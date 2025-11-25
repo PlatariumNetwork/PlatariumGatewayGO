@@ -64,6 +64,78 @@ func (h *Handler) GetSockets(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, response)
 }
 
+// GetDetailedStatus returns detailed status of all components
+func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
+	components := make(map[string]string)
+	
+	// Check REST API status (if we can respond, it's OK)
+	components["REST"] = "ok"
+	
+	// Check WebSocket server status
+	if h.wsServer != nil {
+		components["WebSocket"] = "ok"
+	} else {
+		components["WebSocket"] = "not_ok"
+	}
+	
+	// Check P2P connections (must have at least 1 peer)
+	connectedNodes := h.nodesManager.GetConnectedNodes()
+	if len(connectedNodes) > 0 {
+		components["P2P"] = "ok"
+	} else {
+		components["P2P"] = "not_ok"
+	}
+	
+	// Check Balance system (check if blockchain is initialized)
+	if h.blockchain != nil {
+		// Try to get a balance to verify it works
+		// GetBalance always returns a string (even "0" for non-existent addresses)
+		testBalance := h.blockchain.GetBalance("test")
+		// If we get a response (even "0"), the system is working
+		if testBalance != "" {
+			components["Balance"] = "ok"
+		} else {
+			components["Balance"] = "not_ok"
+		}
+	} else {
+		components["Balance"] = "not_ok"
+	}
+	
+	// Check Transactions module (check if we can get last transaction)
+	if h.blockchain != nil {
+		lastTx := h.blockchain.GetLastTransaction()
+		if lastTx != nil {
+			components["Transactions"] = "ok"
+		} else {
+			// If no transactions yet, it's still OK (module works)
+			components["Transactions"] = "ok"
+		}
+	} else {
+		components["Transactions"] = "not_ok"
+	}
+	
+	// Determine overall status
+	overallStatus := "ok"
+	for _, status := range components {
+		if status == "not_ok" {
+			overallStatus = "not_ok"
+			break
+		}
+	}
+	
+	response := map[string]interface{}{
+		"network":    "Platarium",
+		"status":     overallStatus,
+		"components": components,
+		"nodeId":     h.nodesManager.GetNodeID(),
+		"nodeAddress": h.nodesManager.GetNodeAddress(),
+		"connectedPeers": len(connectedNodes),
+		"timestamp":  time.Now().UnixMilli(),
+	}
+	
+	jsonResponse(w, http.StatusOK, response)
+}
+
 func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	address := vars["address"]

@@ -73,10 +73,28 @@ func main() {
 	// Initialize handlers
 	handler := handlers.NewHandler(bc, nodesManager, wsServer)
 
+	// Static file server for web UI
+	router.PathPrefix("/web/").Handler(http.StripPrefix("/web/", http.FileServer(http.Dir("./web/"))))
+	
+	// Serve index.html at root
+	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.ServeFile(w, r, "./web/index.html")
+		} else {
+			handler.HealthCheck(w, r)
+		}
+	}).Methods("GET")
+	
 	// Routes
-	router.HandleFunc("/", handler.HealthCheck).Methods("GET")
+	router.HandleFunc("/api", handler.HealthCheck).Methods("GET")
 	router.HandleFunc("/network", handler.NetworkStatus).Methods("GET")
 	router.HandleFunc("/sockets", handler.GetSockets).Methods("GET")
+	
+	// RPC endpoints for monitoring
+	router.HandleFunc("/rpc/status", handler.GetDetailedStatus).Methods("GET")
+	router.HandleFunc("/rpc/sockets", handler.GetSockets).Methods("GET")
+	
+	// Blockchain API routes
 	router.HandleFunc("/pg-bal/{address}", handler.GetBalance).Methods("GET")
 	router.HandleFunc("/pg-tx/{hash}", handler.GetTransaction).Methods("GET")
 	router.HandleFunc("/pg-alltx/{address}", handler.GetTransactions).Methods("GET")

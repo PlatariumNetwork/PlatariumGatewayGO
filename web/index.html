@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Platarium Network Status</title>
+  <meta name="description" content="Monitor Platarium blockchain network and RPC node status in real-time.">
+  <link rel="icon" type="image/png" href="/favicon.png">
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background-color: #000;
+      color: #fff;
+      font-family: "Courier New", Courier, monospace;
+      display: flex;
+      flex-direction: column;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+    
+    .header {
+      padding: 20px;
+      font-size: 1.8em;
+      font-weight: bold;
+      border-bottom: 2px solid #333;
+      margin-bottom: 20px;
+    }
+    
+    .container {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      flex: 1;
+    }
+    
+    .section {
+      background-color: #111;
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 20px;
+    }
+    
+    .section-title {
+      font-size: 1.3em;
+      font-weight: bold;
+      margin-bottom: 15px;
+      color: #00ff00;
+      border-bottom: 1px solid #333;
+      padding-bottom: 10px;
+    }
+    
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 15px;
+      margin-top: 15px;
+    }
+    
+    .status-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px;
+      background-color: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 4px;
+    }
+    
+    .status-label {
+      font-weight: bold;
+    }
+    
+    .status-value {
+      font-size: 1.1em;
+      font-weight: bold;
+    }
+    
+    .ok {
+      color: #00ff00;
+    }
+    
+    .not_ok, .error {
+      color: #ff4c4c;
+    }
+    
+    .warning {
+      color: #ffaa00;
+    }
+    
+    .info {
+      color: #00aaff;
+    }
+    
+    .timestamp {
+      color: #888;
+      font-size: 0.9em;
+      margin-top: 15px;
+      padding-top: 15px;
+      border-top: 1px solid #333;
+    }
+    
+    .sockets-list {
+      margin-top: 15px;
+      max-height: 300px;
+      overflow-y: auto;
+      background-color: #1a1a1a;
+      padding: 10px;
+      border-radius: 4px;
+    }
+    
+    .socket-item {
+      padding: 8px;
+      border-bottom: 1px solid #333;
+      font-size: 0.9em;
+    }
+    
+    .socket-item:last-child {
+      border-bottom: none;
+    }
+    
+    .loading {
+      color: #888;
+      font-style: italic;
+    }
+    
+    .network-info {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+      margin-top: 15px;
+    }
+    
+    .info-item {
+      padding: 10px;
+      background-color: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 4px;
+    }
+    
+    .info-label {
+      color: #888;
+      font-size: 0.9em;
+      margin-bottom: 5px;
+    }
+    
+    .info-value {
+      font-size: 1.1em;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">Platarium Network Status Monitor</div>
+  
+  <div class="container">
+    <div class="section">
+      <div class="section-title">Component Status</div>
+      <div class="status-grid" id="components">
+        <div class="loading">Loading component status...</div>
+      </div>
+    </div>
+    
+    <div class="section">
+      <div class="section-title">Network Information</div>
+      <div class="network-info" id="networkInfo">
+        <div class="loading">Loading network information...</div>
+      </div>
+    </div>
+    
+    <div class="section">
+      <div class="section-title">Connected Clients & Peers</div>
+      <div id="sockets">
+        <div class="loading">Loading sockets info...</div>
+      </div>
+    </div>
+    
+    <div class="timestamp" id="timestamp">
+      Last update: Never
+    </div>
+  </div>
+
+  <script>
+    const STATUS_URL = "/rpc/status";
+    const SOCKETS_URL = "/rpc/sockets";
+    
+    const componentsEl = document.getElementById("components");
+    const networkInfoEl = document.getElementById("networkInfo");
+    const socketsEl = document.getElementById("sockets");
+    const timestampEl = document.getElementById("timestamp");
+
+    function getStatusClass(status) {
+      if (status === "ok" || status === "OK") return "ok";
+      if (status === "not_ok" || status === "NOT_OK" || status === "error") return "not_ok";
+      return "warning";
+    }
+
+    function formatStatus(status) {
+      if (status === "ok" || status === "OK") return "OK";
+      if (status === "not_ok" || status === "NOT_OK") return "NOT OK";
+      return status.toUpperCase();
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch(STATUS_URL);
+        if (!res.ok) throw new Error("Network response not OK");
+        const data = await res.json();
+        
+        // Display component statuses
+        if (data.components) {
+          componentsEl.innerHTML = "";
+          for (const [component, status] of Object.entries(data.components)) {
+            const statusClass = getStatusClass(status);
+            const statusText = formatStatus(status);
+            const item = document.createElement("div");
+            item.className = "status-item";
+            item.innerHTML = `
+              <span class="status-label">${component}</span>
+              <span class="status-value ${statusClass}">${statusText}</span>
+            `;
+            componentsEl.appendChild(item);
+          }
+        } else {
+          // Fallback for old format
+          const statusClass = data.status === "ok" ? "ok" : "error";
+          componentsEl.innerHTML = `
+            <div class="status-item">
+              <span class="status-label">RPC Server</span>
+              <span class="status-value ${statusClass}">${data.status.toUpperCase()}</span>
+            </div>
+          `;
+        }
+        
+        // Display network information
+        if (data.network || data.nodeId) {
+          networkInfoEl.innerHTML = "";
+          
+          if (data.network) {
+            const networkItem = document.createElement("div");
+            networkItem.className = "info-item";
+            networkItem.innerHTML = `
+              <div class="info-label">Network</div>
+              <div class="info-value">${data.network}</div>
+            `;
+            networkInfoEl.appendChild(networkItem);
+          }
+          
+          if (data.nodeId) {
+            const nodeIdItem = document.createElement("div");
+            nodeIdItem.className = "info-item";
+            nodeIdItem.innerHTML = `
+              <div class="info-label">Node ID</div>
+              <div class="info-value">${data.nodeId.substring(0, 20)}...</div>
+            `;
+            networkInfoEl.appendChild(nodeIdItem);
+          }
+          
+          if (data.nodeAddress) {
+            const addressItem = document.createElement("div");
+            addressItem.className = "info-item";
+            addressItem.innerHTML = `
+              <div class="info-label">Node Address</div>
+              <div class="info-value">${data.nodeAddress}</div>
+            `;
+            networkInfoEl.appendChild(addressItem);
+          }
+          
+          if (data.connectedPeers !== undefined) {
+            const peersItem = document.createElement("div");
+            peersItem.className = "info-item";
+            peersItem.innerHTML = `
+              <div class="info-label">Connected Peers</div>
+              <div class="info-value ${data.connectedPeers > 0 ? 'ok' : 'warning'}">${data.connectedPeers}</div>
+            `;
+            networkInfoEl.appendChild(peersItem);
+          }
+        }
+        
+        // Update timestamp
+        if (data.timestamp) {
+          const date = new Date(data.timestamp);
+          timestampEl.textContent = `Last update: ${date.toLocaleString()}`;
+        }
+        
+      } catch (err) {
+        componentsEl.innerHTML = `
+          <div class="status-item">
+            <span class="status-label">Status Check</span>
+            <span class="status-value error">ERROR</span>
+          </div>
+        `;
+        console.error("Error fetching status:", err);
+      }
+    }
+
+    async function fetchSockets() {
+      try {
+        const res = await fetch(SOCKETS_URL);
+        if (!res.ok) throw new Error("Network response not OK");
+        const data = await res.json();
+        
+        let html = "";
+        
+        if (data.summary) {
+          html += `
+            <div class="network-info" style="margin-bottom: 15px;">
+              <div class="info-item">
+                <div class="info-label">Connected Clients</div>
+                <div class="info-value ${data.summary.connectedClients > 0 ? 'ok' : 'warning'}">${data.summary.connectedClients}</div>
+              </div>
+              <div class="info-item">
+                <div class="info-label">Connected Peers</div>
+                <div class="info-value ${data.summary.connectedPeers > 0 ? 'ok' : 'warning'}">${data.summary.connectedPeers}</div>
+              </div>
+            </div>
+          `;
+        }
+        
+        if (data.connectedSockets && data.connectedSockets.length > 0) {
+          html += `<div class="sockets-list">`;
+          data.connectedSockets.forEach(socket => {
+            html += `
+              <div class="socket-item">
+                <strong>${socket.socketId}</strong> - ${socket.ipAddress}
+                <br>
+                <span style="color: #888; font-size: 0.85em;">
+                  Node: ${socket.nodeId ? socket.nodeId.substring(0, 8) + '...' : 'N/A'} | 
+                  Connected: ${socket.connectedAt ? new Date(socket.connectedAt).toLocaleString() : 'N/A'}
+                </span>
+              </div>
+            `;
+          });
+          html += `</div>`;
+        } else {
+          html += `<div style="color: #888; padding: 20px; text-align: center;">No connected clients</div>`;
+        }
+        
+        socketsEl.innerHTML = html;
+        
+      } catch (err) {
+        socketsEl.innerHTML = `<div class="error">Error fetching sockets info: ${err.message}</div>`;
+        console.error("Error fetching sockets:", err);
+      }
+    }
+
+    async function update() {
+      await Promise.all([fetchStatus(), fetchSockets()]);
+    }
+
+    // Initial load
+    update();
+    
+    // Update every 10 seconds
+    setInterval(update, 10000);
+  </script>
+</body>
+</html>
+
