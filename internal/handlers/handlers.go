@@ -123,14 +123,25 @@ func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// Get peers with ping information
+	peersWithPing := h.nodesManager.GetPeersWithPing()
+	
+	// Get socket summary
+	allSockets := h.nodesManager.GetConnectedSockets()
+	
 	response := map[string]interface{}{
-		"network":    "Platarium",
-		"status":     overallStatus,
-		"components": components,
-		"nodeId":     h.nodesManager.GetNodeID(),
-		"nodeAddress": h.nodesManager.GetNodeAddress(),
+		"network":        "Platarium",
+		"status":         overallStatus,
+		"components":     components,
+		"nodeId":         h.nodesManager.GetNodeID(),
+		"nodeAddress":    h.nodesManager.GetNodeAddress(),
 		"connectedPeers": len(connectedNodes),
-		"timestamp":  time.Now().UnixMilli(),
+		"peers":          peersWithPing,
+		"summary": map[string]interface{}{
+			"connectedClients": len(allSockets),
+			"connectedPeers":   len(connectedNodes),
+		},
+		"timestamp": time.Now().UnixMilli(),
 	}
 	
 	jsonResponse(w, http.StatusOK, response)
@@ -248,5 +259,47 @@ func getInt(m map[string]interface{}, key string) int {
 func generateHash() string {
 	// Simple hash generation - in production use proper hashing
 	return time.Now().Format("20060102150405") + "-hash"
+}
+
+// PingPeer handles ping requests to peer nodes
+func (h *Handler) PingPeer(w http.ResponseWriter, r *http.Request) {
+	address := r.URL.Query().Get("address")
+	if address == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{
+			"error": "address parameter is required",
+		})
+		return
+	}
+
+	// Simple ping implementation - measure connection time
+	start := time.Now()
+	
+	// Try to connect to the peer's HTTP endpoint
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+	
+	// Convert WebSocket address to HTTP
+	httpAddr := address
+	if len(httpAddr) > 2 && httpAddr[:2] == "ws" {
+		httpAddr = "http" + httpAddr[2:]
+	}
+	
+	resp, err := client.Get(httpAddr + "/")
+	duration := time.Since(start)
+	
+	var ping *int64
+	if err == nil && resp != nil {
+		resp.Body.Close()
+		pingMs := duration.Milliseconds()
+		ping = &pingMs
+	}
+	
+	response := map[string]interface{}{
+		"address": address,
+		"ping":    ping,
+	}
+	
+	jsonResponse(w, http.StatusOK, response)
 }
 

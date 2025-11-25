@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +103,92 @@ func (nm *NodesManager) GetConnectedNodes() []NodeInfo {
 		})
 	}
 	return nodes
+}
+
+// PeerWithPing represents a peer node with ping information
+type PeerWithPing struct {
+	NodeID  string `json:"nodeId"`
+	Address string `json:"address"`
+	Host    string `json:"host"`
+	Port    int    `json:"port"`
+	Ping    *int64 `json:"ping,omitempty"` // Ping in milliseconds, nil if unknown
+}
+
+// GetPeersWithPing returns all connected peer nodes with ping information
+func (nm *NodesManager) GetPeersWithPing() []PeerWithPing {
+	nm.mu.RLock()
+	peersList := make([]*PeerConnection, 0, len(nm.connectedNodes))
+	for _, peer := range nm.connectedNodes {
+		peersList = append(peersList, peer)
+	}
+	nm.mu.RUnlock()
+
+	peers := make([]PeerWithPing, 0, len(peersList))
+	
+	// Use a channel to collect ping results concurrently
+	type pingResult struct {
+		index int
+		ping  *int64
+	}
+	pingChan := make(chan pingResult, len(peersList))
+	
+	// Measure ping for each peer concurrently
+	for i, peer := range peersList {
+		go func(idx int, p *PeerConnection) {
+			var ping *int64
+			
+			if p.Conn != nil {
+				// Try to measure actual ping by making HTTP request
+				httpAddr := p.Address
+				if strings.HasPrefix(httpAddr, "ws://") {
+					httpAddr = "http://" + httpAddr[5:]
+				} else if strings.HasPrefix(httpAddr, "wss://") {
+					httpAddr = "https://" + httpAddr[6:]
+				}
+				
+				client := &http.Client{
+					Timeout: 3 * time.Second,
+				}
+				
+				start := time.Now()
+				resp, err := client.Get(httpAddr + "/api")
+				if err == nil && resp != nil {
+					resp.Body.Close()
+					pingMs := time.Since(start).Milliseconds()
+					ping = &pingMs
+				}
+			}
+			
+			pingChan <- pingResult{index: idx, ping: ping}
+		}(i, peer)
+	}
+	
+	// Collect results with timeout
+	results := make(map[int]*int64)
+	timeout := time.After(2 * time.Second)
+	
+	for i := 0; i < len(peersList); i++ {
+		select {
+		case result := <-pingChan:
+			results[result.index] = result.ping
+		case <-timeout:
+			break
+		}
+	}
+	
+	// Build final list with ping results
+	for i, peer := range peersList {
+		ping := results[i]
+		peers = append(peers, PeerWithPing{
+			NodeID:  peer.NodeID,
+			Address: peer.Address,
+			Host:    peer.Host,
+			Port:    peer.Port,
+			Ping:    ping,
+		})
+	}
+	
+	return peers
 }
 
 // GetConnectedSockets returns all connected sockets (local + peer nodes)

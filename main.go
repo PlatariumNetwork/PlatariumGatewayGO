@@ -93,6 +93,7 @@ func main() {
 	// RPC endpoints for monitoring
 	router.HandleFunc("/rpc/status", handler.GetDetailedStatus).Methods("GET")
 	router.HandleFunc("/rpc/sockets", handler.GetSockets).Methods("GET")
+	router.HandleFunc("/rpc/ping", handler.PingPeer).Methods("GET")
 	
 	// Blockchain API routes
 	router.HandleFunc("/pg-bal/{address}", handler.GetBalance).Methods("GET")

@@ -25,6 +25,26 @@
       font-weight: bold;
       border-bottom: 2px solid #333;
       margin-bottom: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .network-status {
+      font-size: 0.6em;
+      padding: 10px 20px;
+      border-radius: 4px;
+      font-weight: bold;
+    }
+    
+    .network-status.online {
+      background-color: #00ff00;
+      color: #000;
+    }
+    
+    .network-status.offline {
+      background-color: #ff4c4c;
+      color: #fff;
     }
     
     .container {
@@ -148,10 +168,85 @@
       font-size: 1.1em;
       word-break: break-all;
     }
+    
+    .peer-list {
+      margin-top: 15px;
+    }
+    
+    .peer-item {
+      padding: 10px;
+      margin-bottom: 10px;
+      background-color: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .peer-info {
+      flex: 1;
+    }
+    
+    .peer-ping {
+      padding: 5px 10px;
+      border-radius: 4px;
+      font-weight: bold;
+      margin-left: 10px;
+    }
+    
+    .peer-ping.good {
+      background-color: #00ff00;
+      color: #000;
+    }
+    
+    .peer-ping.medium {
+      background-color: #ffaa00;
+      color: #000;
+    }
+    
+    .peer-ping.bad {
+      background-color: #ff4c4c;
+      color: #fff;
+    }
+    
+    .peer-ping.unknown {
+      background-color: #666;
+      color: #fff;
+    }
+    
+    .summary-panel {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+      margin-top: 15px;
+    }
+    
+    .summary-item {
+      padding: 15px;
+      background-color: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 4px;
+      text-align: center;
+    }
+    
+    .summary-value {
+      font-size: 2em;
+      font-weight: bold;
+      margin: 10px 0;
+    }
+    
+    .summary-label {
+      color: #888;
+      font-size: 0.9em;
+    }
   </style>
 </head>
 <body>
-  <div class="header">Platarium Network Status Monitor</div>
+  <div class="header">
+    <div>Platarium Network Status Monitor</div>
+    <div class="network-status offline" id="networkStatus">OFFLINE</div>
+  </div>
   
   <div class="container">
     <div class="section">
@@ -169,7 +264,21 @@
     </div>
     
     <div class="section">
-      <div class="section-title">Connected Clients & Peers</div>
+      <div class="section-title">Summary</div>
+      <div class="summary-panel" id="summary">
+        <div class="loading">Loading summary...</div>
+      </div>
+    </div>
+    
+    <div class="section">
+      <div class="section-title">Connected Peers</div>
+      <div class="peer-list" id="peers">
+        <div class="loading">Loading peers...</div>
+      </div>
+    </div>
+    
+    <div class="section">
+      <div class="section-title">Connected Clients</div>
       <div id="sockets">
         <div class="loading">Loading sockets info...</div>
       </div>
@@ -184,8 +293,11 @@
     const STATUS_URL = "/rpc/status";
     const SOCKETS_URL = "/rpc/sockets";
     
+    const networkStatusEl = document.getElementById("networkStatus");
     const componentsEl = document.getElementById("components");
     const networkInfoEl = document.getElementById("networkInfo");
+    const summaryEl = document.getElementById("summary");
+    const peersEl = document.getElementById("peers");
     const socketsEl = document.getElementById("sockets");
     const timestampEl = document.getElementById("timestamp");
 
@@ -201,11 +313,65 @@
       return status.toUpperCase();
     }
 
+    function getPingClass(ping) {
+      if (ping === null || ping === undefined) return "unknown";
+      if (ping < 50) return "good";
+      if (ping < 150) return "medium";
+      return "bad";
+    }
+
+    function formatPing(ping) {
+      if (ping === null || ping === undefined) return "N/A";
+      return `${ping}ms`;
+    }
+
+    async function pingPeer(address) {
+      const startTime = performance.now();
+      try {
+        // Try to connect to WebSocket endpoint
+        const wsUrl = address.replace('ws://', 'http://').replace('wss://', 'https://');
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        
+        const response = await fetch(`${wsUrl}/`, {
+          method: 'GET',
+          signal: controller.signal,
+          mode: 'no-cors'
+        });
+        
+        clearTimeout(timeoutId);
+        const endTime = performance.now();
+        return Math.round(endTime - startTime);
+      } catch (error) {
+        // Try alternative ping method
+        try {
+          const start = Date.now();
+          const response = await fetch(`/rpc/ping?address=${encodeURIComponent(address)}`, {
+            method: 'GET',
+            signal: AbortSignal.timeout(5000)
+          });
+          const end = Date.now();
+          if (response.ok) {
+            return end - start;
+          }
+        } catch (e) {
+          // Fallback: estimate based on connection attempt
+          return null;
+        }
+        return null;
+      }
+    }
+
     async function fetchStatus() {
       try {
         const res = await fetch(STATUS_URL);
         if (!res.ok) throw new Error("Network response not OK");
         const data = await res.json();
+        
+        // Update network status
+        const isOnline = data.status === "ok";
+        networkStatusEl.textContent = isOnline ? "ONLINE" : "OFFLINE";
+        networkStatusEl.className = `network-status ${isOnline ? "online" : "offline"}`;
         
         // Display component statuses
         if (data.components) {
@@ -221,60 +387,85 @@
             `;
             componentsEl.appendChild(item);
           }
-        } else {
-          // Fallback for old format
-          const statusClass = data.status === "ok" ? "ok" : "error";
-          componentsEl.innerHTML = `
-            <div class="status-item">
-              <span class="status-label">RPC Server</span>
-              <span class="status-value ${statusClass}">${data.status.toUpperCase()}</span>
-            </div>
-          `;
         }
         
         // Display network information
-        if (data.network || data.nodeId) {
-          networkInfoEl.innerHTML = "";
-          
-          if (data.network) {
-            const networkItem = document.createElement("div");
-            networkItem.className = "info-item";
-            networkItem.innerHTML = `
-              <div class="info-label">Network</div>
-              <div class="info-value">${data.network}</div>
-            `;
-            networkInfoEl.appendChild(networkItem);
+        networkInfoEl.innerHTML = "";
+        
+        if (data.network) {
+          const networkItem = document.createElement("div");
+          networkItem.className = "info-item";
+          networkItem.innerHTML = `
+            <div class="info-label">Network</div>
+            <div class="info-value">${data.network}</div>
+          `;
+          networkInfoEl.appendChild(networkItem);
+        }
+        
+        if (data.nodeId) {
+          const nodeIdItem = document.createElement("div");
+          nodeIdItem.className = "info-item";
+          nodeIdItem.innerHTML = `
+            <div class="info-label">Node ID</div>
+            <div class="info-value">${data.nodeId.substring(0, 20)}...</div>
+          `;
+          networkInfoEl.appendChild(nodeIdItem);
+        }
+        
+        if (data.nodeAddress) {
+          const addressItem = document.createElement("div");
+          addressItem.className = "info-item";
+          addressItem.innerHTML = `
+            <div class="info-label">Node Address</div>
+            <div class="info-value">${data.nodeAddress}</div>
+          `;
+          networkInfoEl.appendChild(addressItem);
+        }
+        
+        // Display summary
+        summaryEl.innerHTML = "";
+        
+        const clientsItem = document.createElement("div");
+        clientsItem.className = "summary-item";
+        clientsItem.innerHTML = `
+          <div class="summary-label">Connected Clients</div>
+          <div class="summary-value ${data.summary?.connectedClients > 0 ? 'ok' : 'warning'}">${data.summary?.connectedClients || 0}</div>
+        `;
+        summaryEl.appendChild(clientsItem);
+        
+        const peersItem = document.createElement("div");
+        peersItem.className = "summary-item";
+        peersItem.innerHTML = `
+          <div class="summary-label">Connected Peers</div>
+          <div class="summary-value ${data.connectedPeers > 0 ? 'ok' : 'warning'}">${data.connectedPeers || 0}</div>
+        `;
+        summaryEl.appendChild(peersItem);
+        
+        // Display peers with ping
+        if (data.peers && Array.isArray(data.peers)) {
+          peersEl.innerHTML = "";
+          if (data.peers.length === 0) {
+            peersEl.innerHTML = '<div style="color: #888; padding: 20px; text-align: center;">No connected peers</div>';
+          } else {
+            for (const peer of data.peers) {
+              const peerItem = document.createElement("div");
+              peerItem.className = "peer-item";
+              
+              const ping = peer.ping !== undefined ? peer.ping : null;
+              const pingClass = getPingClass(ping);
+              
+              peerItem.innerHTML = `
+                <div class="peer-info">
+                  <div><strong>${peer.nodeId ? peer.nodeId.substring(0, 8) + '...' : 'Unknown'}</strong></div>
+                  <div style="color: #888; font-size: 0.9em;">${peer.address || peer.host || 'N/A'}</div>
+                </div>
+                <div class="peer-ping ${pingClass}">${formatPing(ping)}</div>
+              `;
+              peersEl.appendChild(peerItem);
+            }
           }
-          
-          if (data.nodeId) {
-            const nodeIdItem = document.createElement("div");
-            nodeIdItem.className = "info-item";
-            nodeIdItem.innerHTML = `
-              <div class="info-label">Node ID</div>
-              <div class="info-value">${data.nodeId.substring(0, 20)}...</div>
-            `;
-            networkInfoEl.appendChild(nodeIdItem);
-          }
-          
-          if (data.nodeAddress) {
-            const addressItem = document.createElement("div");
-            addressItem.className = "info-item";
-            addressItem.innerHTML = `
-              <div class="info-label">Node Address</div>
-              <div class="info-value">${data.nodeAddress}</div>
-            `;
-            networkInfoEl.appendChild(addressItem);
-          }
-          
-          if (data.connectedPeers !== undefined) {
-            const peersItem = document.createElement("div");
-            peersItem.className = "info-item";
-            peersItem.innerHTML = `
-              <div class="info-label">Connected Peers</div>
-              <div class="info-value ${data.connectedPeers > 0 ? 'ok' : 'warning'}">${data.connectedPeers}</div>
-            `;
-            networkInfoEl.appendChild(peersItem);
-          }
+        } else {
+          peersEl.innerHTML = '<div style="color: #888; padding: 20px; text-align: center;">No peer information available</div>';
         }
         
         // Update timestamp
@@ -284,6 +475,8 @@
         }
         
       } catch (err) {
+        networkStatusEl.textContent = "OFFLINE";
+        networkStatusEl.className = "network-status offline";
         componentsEl.innerHTML = `
           <div class="status-item">
             <span class="status-label">Status Check</span>
@@ -301,21 +494,6 @@
         const data = await res.json();
         
         let html = "";
-        
-        if (data.summary) {
-          html += `
-            <div class="network-info" style="margin-bottom: 15px;">
-              <div class="info-item">
-                <div class="info-label">Connected Clients</div>
-                <div class="info-value ${data.summary.connectedClients > 0 ? 'ok' : 'warning'}">${data.summary.connectedClients}</div>
-              </div>
-              <div class="info-item">
-                <div class="info-label">Connected Peers</div>
-                <div class="info-value ${data.summary.connectedPeers > 0 ? 'ok' : 'warning'}">${data.summary.connectedPeers}</div>
-              </div>
-            </div>
-          `;
-        }
         
         if (data.connectedSockets && data.connectedSockets.length > 0) {
           html += `<div class="sockets-list">`;
@@ -356,4 +534,3 @@
   </script>
 </body>
 </html>
-
