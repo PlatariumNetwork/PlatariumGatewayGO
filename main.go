@@ -69,6 +69,7 @@ func main() {
 	// Setup REST API
 	router := mux.NewRouter()
 	router.Use(corsMiddleware)
+	router.Use(loggingMiddleware)
 
 	// Initialize handlers
 	handler := handlers.NewHandler(bc, nodesManager, wsServer)
@@ -76,21 +77,12 @@ func main() {
 	// Static file server for web UI
 	router.PathPrefix("/web/").Handler(http.StripPrefix("/web/", http.FileServer(http.Dir("./web/"))))
 	
-	// Serve index.html at root
-	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			http.ServeFile(w, r, "./web/index.html")
-		} else {
-			handler.HealthCheck(w, r)
-		}
-	}).Methods("GET")
-	
-	// Routes
+	// API Routes (must be registered before root handler)
 	router.HandleFunc("/api", handler.HealthCheck).Methods("GET")
 	router.HandleFunc("/network", handler.NetworkStatus).Methods("GET")
 	router.HandleFunc("/sockets", handler.GetSockets).Methods("GET")
 	
-	// RPC endpoints for monitoring
+	// RPC endpoints for monitoring (must be registered before root handler)
 	router.HandleFunc("/rpc/status", handler.GetDetailedStatus).Methods("GET")
 	router.HandleFunc("/rpc/sockets", handler.GetSockets).Methods("GET")
 	router.HandleFunc("/rpc/ping", handler.PingPeer).Methods("GET")
@@ -100,6 +92,21 @@ func main() {
 	router.HandleFunc("/pg-tx/{hash}", handler.GetTransaction).Methods("GET")
 	router.HandleFunc("/pg-alltx/{address}", handler.GetTransactions).Methods("GET")
 	router.HandleFunc("/pg-sendtx", handler.SendTransaction).Methods("POST")
+	
+	// Serve index.html at root and /index.html (must be last to not interfere with other routes)
+	router.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "./web/index.html")
+	}).Methods("GET")
+	
+	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Only serve index.html for exact root path
+		if r.URL.Path == "/" {
+			http.ServeFile(w, r, "./web/index.html")
+		} else {
+			// For any other path, return 404
+			http.NotFound(w, r)
+		}
+	}).Methods("GET")
 
 	// Start REST API server
 	restServer := &http.Server{
@@ -150,6 +157,13 @@ func corsMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		next.ServeHTTP(w, r)
+	})
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[HTTP] %s %s", r.Method, r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
 }
