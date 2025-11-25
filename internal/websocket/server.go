@@ -107,12 +107,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.nodesManager.AnnounceClientConnected(clientID, clientIP, connectedAt)
 	}
 
-	// Handle peer node announcements
-	if s.nodesManager != nil {
-		go s.handlePeerMessages(conn, clientID)
-	}
-
-	// Handle client messages
+	// Handle client messages (also handles peer messages)
 	go s.handleClientMessages(client)
 
 	// Cleanup on disconnect
