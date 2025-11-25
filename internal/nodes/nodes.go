@@ -39,22 +39,36 @@ type NodesManager struct {
 	nodePort    int
 	nodeAddress string
 
-	connectedNodes     map[string]*PeerConnection
+	connectedNodes      map[string]*PeerConnection
 	peerSocketsRegistry map[string]map[string]*SocketInfo
-	reconnectTimers    map[string]*time.Timer
-	getLocalSockets    func() []*SocketInfo
+	reconnectTimers     map[string]*time.Timer
+	getLocalSockets     func() []*SocketInfo
+	seenEvents          map[string]time.Time // For duplicate detection
+	eventMutex          sync.RWMutex
 
 	mu sync.RWMutex
 }
 
+// Event represents a blockchain event
+type Event struct {
+	Type      string      `json:"type"`
+	Data      interface{} `json:"data"`
+	Timestamp int64      `json:"timestamp"`
+	OriginID  string      `json:"originId"`
+	EventID   string      `json:"eventId"` // For duplicate detection
+}
+
 // PeerConnection represents a connection to a peer node
 type PeerConnection struct {
-	NodeID  string
-	Address string
-	Host    string
-	Port    int
-	Conn    *websocket.Conn
-	mu      sync.Mutex
+	NodeID        string
+	Address       string
+	Host          string
+	Port          int
+	Conn          *websocket.Conn
+	LastPong      time.Time
+	PingFailures  int
+	HeartbeatStop chan bool
+	mu            sync.Mutex
 }
 
 // NewNodesManager creates a new nodes manager
@@ -68,6 +82,7 @@ func NewNodesManager(port int, host string) *NodesManager {
 		connectedNodes:      make(map[string]*PeerConnection),
 		peerSocketsRegistry: make(map[string]map[string]*SocketInfo),
 		reconnectTimers:     make(map[string]*time.Timer),
+		seenEvents:          make(map[string]time.Time),
 	}
 }
 
@@ -193,18 +208,25 @@ func (nm *NodesManager) GetPeersWithPing() []PeerWithPing {
 
 // GetConnectedSockets returns all connected sockets (local + peer nodes)
 func (nm *NodesManager) GetConnectedSockets() []*SocketInfo {
-	nm.mu.RLock()
-	defer nm.mu.RUnlock()
-
 	allSockets := make([]*SocketInfo, 0)
 
-	// Add local sockets
+	// Add local sockets (no lock needed for getter function)
 	if nm.getLocalSockets != nil {
 		allSockets = append(allSockets, nm.getLocalSockets()...)
 	}
 
 	// Add peer node sockets
-	for _, socketsMap := range nm.peerSocketsRegistry {
+	nm.mu.RLock()
+	peerSocketsCopy := make(map[string]map[string]*SocketInfo)
+	for nodeID, socketsMap := range nm.peerSocketsRegistry {
+		peerSocketsCopy[nodeID] = make(map[string]*SocketInfo)
+		for socketID, socket := range socketsMap {
+			peerSocketsCopy[nodeID][socketID] = socket
+		}
+	}
+	nm.mu.RUnlock()
+
+	for _, socketsMap := range peerSocketsCopy {
 		for _, socket := range socketsMap {
 			allSockets = append(allSockets, socket)
 		}
@@ -216,17 +238,30 @@ func (nm *NodesManager) GetConnectedSockets() []*SocketInfo {
 // ConnectToPeers connects to all peer nodes from configuration
 func (nm *NodesManager) ConnectToPeers() {
 	peers := nm.loadPeers()
+	log.Printf("[NODE] Connecting to %d peer(s)...", len(peers))
 	for _, peerAddr := range peers {
 		if peerAddr != nm.nodeAddress {
-			go nm.ConnectToNode(peerAddr)
+			go nm.ConnectToNodeWithRetry(peerAddr)
 		}
 	}
 }
 
-// ConnectToNode connects to a specific peer node
-func (nm *NodesManager) ConnectToNode(address string) {
+// ConnectToNodeWithRetry connects to a peer node with automatic retry on failure
+func (nm *NodesManager) ConnectToNodeWithRetry(address string) {
+	for {
+		err := nm.tryConnect(address)
+		if err == nil {
+			break // Successfully connected
+		}
+		log.Printf("[NODE] Failed to connect to %s: %v. Retrying in 5s...", address, err)
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// tryConnect attempts to connect to a peer node
+func (nm *NodesManager) tryConnect(address string) error {
 	if address == nm.nodeAddress {
-		return
+		return fmt.Errorf("cannot connect to self")
 	}
 
 	nm.mu.Lock()
@@ -234,7 +269,7 @@ func (nm *NodesManager) ConnectToNode(address string) {
 	for _, peer := range nm.connectedNodes {
 		if peer.Address == address {
 			nm.mu.Unlock()
-			return
+			return nil // Already connected
 		}
 	}
 	nm.mu.Unlock()
@@ -245,9 +280,7 @@ func (nm *NodesManager) ConnectToNode(address string) {
 
 	conn, _, err := dialer.Dial(address, nil)
 	if err != nil {
-		log.Printf("[NODE] Connection error to %s: %v", address, err)
-		nm.scheduleReconnect(address)
-		return
+		return err
 	}
 
 	log.Printf("[NODE] Connected to %s", address)
@@ -266,11 +299,91 @@ func (nm *NodesManager) ConnectToNode(address string) {
 
 	// Handle the connection
 	go nm.handlePeerConnection(conn, address)
+	return nil
+}
+
+// ConnectToNode connects to a specific peer node (legacy method, uses tryConnect)
+func (nm *NodesManager) ConnectToNode(address string) {
+	if err := nm.tryConnect(address); err != nil {
+		log.Printf("[NODE] Connection error to %s: %v", address, err)
+		nm.scheduleReconnect(address)
+	}
 }
 
 func (nm *NodesManager) handlePeerConnection(conn *websocket.Conn, address string) {
 	defer conn.Close()
 
+	// Set up heartbeat/ping-pong
+	conn.SetPongHandler(func(string) error {
+		nm.mu.Lock()
+		for nodeID, peer := range nm.connectedNodes {
+			if peer.Address == address {
+				peer.LastPong = time.Now()
+				peer.PingFailures = 0
+				break
+			}
+		}
+		nm.mu.Unlock()
+		return nil
+	})
+
+	// Start heartbeat ticker
+	heartbeatTicker := time.NewTicker(10 * time.Second)
+	defer heartbeatTicker.Stop()
+
+	// Start heartbeat goroutine
+	heartbeatStop := make(chan bool)
+	go func() {
+		for {
+			select {
+			case <-heartbeatTicker.C:
+				nm.mu.RLock()
+				var peer *PeerConnection
+				for _, p := range nm.connectedNodes {
+					if p.Address == address {
+						peer = p
+						break
+					}
+				}
+				nm.mu.RUnlock()
+
+				if peer != nil {
+					peer.mu.Lock()
+					if peer.Conn != nil {
+						// Send ping
+						if err := peer.Conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+							peer.mu.Unlock()
+							return
+						}
+						peer.mu.Unlock()
+
+						// Check for pong response
+						nm.mu.Lock()
+						for _, p := range nm.connectedNodes {
+							if p.Address == address {
+								if time.Since(p.LastPong) > 30*time.Second {
+									p.PingFailures++
+									if p.PingFailures > 2 {
+										log.Printf("[NODE] Too many ping failures for %s, reconnecting...", address)
+										nm.mu.Unlock()
+										return
+									}
+								}
+								break
+							}
+						}
+						nm.mu.Unlock()
+					} else {
+						peer.mu.Unlock()
+					}
+				}
+			case <-heartbeatStop:
+				return
+			}
+		}
+	}()
+
+	// Message reading loop
 	for {
 		var msg map[string]interface{}
 		if err := conn.ReadJSON(&msg); err != nil {
@@ -294,8 +407,22 @@ func (nm *NodesManager) handlePeerConnection(conn *websocket.Conn, address strin
 			nm.handleSocketsRequest(conn)
 		case "sockets:response":
 			nm.HandleSocketsResponse(data)
+		case "sync:request":
+			nm.handleSyncRequest(conn)
+		case "sync:response":
+			nm.handleSyncResponse(data)
+		case "ping":
+			// Respond to ping
+			conn.WriteJSON(map[string]interface{}{
+				"type": "pong",
+			})
+		case "pong":
+			// Pong received, already handled by SetPongHandler
 		}
 	}
+
+	// Stop heartbeat
+	close(heartbeatStop)
 
 	// Clean up on disconnect
 	nm.mu.Lock()
@@ -322,14 +449,40 @@ func (nm *NodesManager) handleNodeAnnounce(data map[string]interface{}, conn *we
 		return
 	}
 
-	nm.mu.Lock()
-	nm.connectedNodes[nodeID] = &PeerConnection{
-		NodeID:  nodeID,
-		Address: peerAddr,
-		Host:    host,
-		Port:    int(port),
-		Conn:    conn,
+	// Verify nodeID before adding
+	if nodeID == "" {
+		log.Printf("[NODE] Rejected peer connection: empty nodeID")
+		return
 	}
+
+	nm.mu.Lock()
+	// Check if already exists
+	if existing, exists := nm.connectedNodes[nodeID]; exists {
+		// Update connection if different
+		if existing.Address != peerAddr {
+			existing.Conn = conn
+			existing.Address = peerAddr
+			existing.Host = host
+			existing.Port = int(port)
+			existing.LastPong = time.Now()
+			existing.PingFailures = 0
+		}
+		nm.mu.Unlock()
+		return
+	}
+
+	// Create new peer connection
+	peer := &PeerConnection{
+		NodeID:        nodeID,
+		Address:       peerAddr,
+		Host:          host,
+		Port:          int(port),
+		Conn:          conn,
+		LastPong:      time.Now(),
+		PingFailures:  0,
+		HeartbeatStop: make(chan bool),
+	}
+	nm.connectedNodes[nodeID] = peer
 	nm.mu.Unlock()
 
 	log.Printf("[NODE] Peer node registered: %s... at %s", nodeID[:8], peerAddr)
@@ -348,6 +501,11 @@ func (nm *NodesManager) handleNodeAnnounce(data map[string]interface{}, conn *we
 	// Request socket list
 	conn.WriteJSON(map[string]interface{}{
 		"type": "sockets:request",
+	})
+
+	// Send blockchain state sync request
+	conn.WriteJSON(map[string]interface{}{
+		"type": "sync:request",
 	})
 }
 
@@ -402,12 +560,39 @@ func (nm *NodesManager) handleClientDisconnected(data map[string]interface{}) {
 
 func (nm *NodesManager) handleBlockchainEvent(data map[string]interface{}) {
 	originNodeID, _ := data["originNodeId"].(string)
+	eventID, _ := data["eventId"].(string)
+	
 	if originNodeID == nm.nodeID {
 		return // Prevent loops
 	}
 
+	// Check for duplicate events
+	if eventID != "" {
+		nm.eventMutex.Lock()
+		if seen, exists := nm.seenEvents[eventID]; exists {
+			// Event seen within last 5 minutes, ignore
+			if time.Since(seen) < 5*time.Minute {
+				nm.eventMutex.Unlock()
+				log.Printf("[NODE] Duplicate event ignored: %s", eventID[:8])
+				return
+			}
+		}
+		nm.seenEvents[eventID] = time.Now()
+		
+		// Clean old events (older than 10 minutes)
+		for id, t := range nm.seenEvents {
+			if time.Since(t) > 10*time.Minute {
+				delete(nm.seenEvents, id)
+			}
+		}
+		nm.eventMutex.Unlock()
+	}
+
 	// Re-broadcast to other nodes
-	eventType, _ := data["type"].(string)
+	eventType, _ := data["eventType"].(string)
+	if eventType == "" {
+		eventType, _ = data["type"].(string) // Fallback
+	}
 	nm.BroadcastBlockchainEvent(eventType, data, originNodeID)
 }
 
@@ -461,13 +646,22 @@ func (nm *NodesManager) BroadcastBlockchainEvent(eventType string, data map[stri
 	nm.mu.RLock()
 	defer nm.mu.RUnlock()
 
+	// Generate unique event ID for duplicate detection
+	eventID := fmt.Sprintf("%s-%d-%s", eventType, time.Now().UnixNano(), nm.nodeID)
+
 	event := map[string]interface{}{
 		"type":         "blockchain:event",
 		"eventType":    eventType,
 		"data":         data,
 		"timestamp":    time.Now().Unix(),
 		"originNodeId": originNodeID,
+		"eventId":      eventID,
 	}
+
+	// Mark as seen by us
+	nm.eventMutex.Lock()
+	nm.seenEvents[eventID] = time.Now()
+	nm.eventMutex.Unlock()
 
 	count := 0
 	for nodeID, peer := range nm.connectedNodes {
@@ -479,13 +673,15 @@ func (nm *NodesManager) BroadcastBlockchainEvent(eventType string, data map[stri
 		if peer.Conn != nil {
 			if err := peer.Conn.WriteJSON(event); err == nil {
 				count++
+			} else {
+				log.Printf("[NODE] Error broadcasting to %s: %v", nodeID[:8], err)
 			}
 		}
 		peer.mu.Unlock()
 	}
 
 	if count > 0 {
-		log.Printf("[NODE] Broadcasted %s to %d node(s)", eventType, count)
+		log.Printf("[NODE] Broadcasted %s (ID: %s) to %d node(s)", eventType, eventID[:8], count)
 	}
 }
 
@@ -604,5 +800,72 @@ func (nm *NodesManager) loadPeers() []string {
 	}
 
 	return filtered
+}
+
+// handleSyncRequest handles blockchain state sync requests
+func (nm *NodesManager) handleSyncRequest(conn *websocket.Conn) {
+	// Send blockchain state (transactions, balances, etc.)
+	// This is a placeholder - in production, send actual blockchain state
+	conn.WriteJSON(map[string]interface{}{
+		"type": "sync:response",
+		"data": map[string]interface{}{
+			"nodeId":     nm.nodeID,
+			"timestamp":  time.Now().Unix(),
+			"blockchain": "synced", // Placeholder
+		},
+	})
+	log.Printf("[NODE] Sent sync response to peer")
+}
+
+// handleSyncResponse handles blockchain state sync responses
+func (nm *NodesManager) handleSyncResponse(data map[string]interface{}) {
+	nodeID, _ := data["nodeId"].(string)
+	log.Printf("[NODE] Received sync response from %s...", nodeID[:8])
+	// In production, merge blockchain state here
+}
+
+// GetMetrics returns monitoring metrics
+func (nm *NodesManager) GetMetrics() map[string]interface{} {
+	nm.mu.RLock()
+	peersList := make([]*PeerConnection, 0, len(nm.connectedNodes))
+	for _, peer := range nm.connectedNodes {
+		peersList = append(peersList, peer)
+	}
+	connectedPeersCount := len(nm.connectedNodes)
+	nm.mu.RUnlock()
+
+	peers := make([]map[string]interface{}, 0)
+	for _, peer := range peersList {
+		peer.mu.Lock()
+		lastPing := int64(0)
+		if !peer.LastPong.IsZero() {
+			lastPing = time.Since(peer.LastPong).Milliseconds()
+		}
+		pingFailures := peer.PingFailures
+		peerAddress := peer.Address
+		peerNodeID := peer.NodeID
+		peer.mu.Unlock()
+		
+		peers = append(peers, map[string]interface{}{
+			"nodeId":       peerNodeID,
+			"address":     peerAddress,
+			"pingFailures": pingFailures,
+			"lastPong":    lastPing,
+		})
+	}
+
+	nm.eventMutex.RLock()
+	seenEventsCount := len(nm.seenEvents)
+	nm.eventMutex.RUnlock()
+
+	// Get connected clients count (without holding main lock)
+	connectedClientsCount := len(nm.GetConnectedSockets())
+
+	return map[string]interface{}{
+		"connectedPeers":   connectedPeersCount,
+		"connectedClients": connectedClientsCount,
+		"peers":            peers,
+		"seenEvents":       seenEventsCount,
+	}
 }
 

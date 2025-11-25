@@ -110,12 +110,12 @@ func main() {
 
 	// Start REST API server
 	restServer := &http.Server{
-		Addr:    fmt.Sprintf(":%d", *portREST),
+		Addr:    fmt.Sprintf("0.0.0.0:%d", *portREST), // Listen on all interfaces
 		Handler: router,
 	}
 
 	go func() {
-		log.Printf("REST API running at http://localhost:%d", *portREST)
+		log.Printf("[REST] REST API running on 0.0.0.0:%d (all interfaces)", *portREST)
 		if err := restServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("REST API server error: %v", err)
 		}

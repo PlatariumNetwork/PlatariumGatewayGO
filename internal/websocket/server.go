@@ -60,11 +60,11 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/", s.handleWebSocket)
 
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", s.port),
+		Addr:    fmt.Sprintf("0.0.0.0:%d", s.port), // Listen on all interfaces
 		Handler: mux,
 	}
 
-	log.Printf("Socket.io server listening on port %d", s.port)
+	log.Printf("[WS] WebSocket server listening on 0.0.0.0:%d (all interfaces)", s.port)
 	return s.server.ListenAndServe()
 }
 

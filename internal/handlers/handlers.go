@@ -129,6 +129,9 @@ func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
 	// Get socket summary
 	allSockets := h.nodesManager.GetConnectedSockets()
 	
+	// Get metrics
+	metrics := h.nodesManager.GetMetrics()
+	
 	response := map[string]interface{}{
 		"network":        "Platarium",
 		"status":         overallStatus,
@@ -141,6 +144,7 @@ func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
 			"connectedClients": len(allSockets),
 			"connectedPeers":   len(connectedNodes),
 		},
+		"metrics":   metrics,
 		"timestamp": time.Now().UnixMilli(),
 	}
 	
