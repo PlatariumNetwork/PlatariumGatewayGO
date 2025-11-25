@@ -316,7 +316,7 @@ func (nm *NodesManager) handlePeerConnection(conn *websocket.Conn, address strin
 	// Set up heartbeat/ping-pong
 	conn.SetPongHandler(func(string) error {
 		nm.mu.Lock()
-		for nodeID, peer := range nm.connectedNodes {
+		for _, peer := range nm.connectedNodes {
 			if peer.Address == address {
 				peer.LastPong = time.Now()
 				peer.PingFailures = 0
