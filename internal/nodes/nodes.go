@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -264,6 +265,15 @@ func (nm *NodesManager) tryConnect(address string) error {
 		return fmt.Errorf("cannot connect to self")
 	}
 
+	parsedURL, err := url.Parse(address)
+	if err != nil {
+		return err
+	}
+	query := parsedURL.Query()
+	query.Set("peer", "1")
+	parsedURL.RawQuery = query.Encode()
+	addressWithPeer := parsedURL.String()
+
 	nm.mu.Lock()
 	// Check if already connected
 	for _, peer := range nm.connectedNodes {
@@ -278,7 +288,7 @@ func (nm *NodesManager) tryConnect(address string) error {
 		HandshakeTimeout: 5 * time.Second,
 	}
 
-	conn, _, err := dialer.Dial(address, nil)
+	conn, _, err := dialer.Dial(addressWithPeer, nil)
 	if err != nil {
 		return err
 	}
@@ -308,6 +318,11 @@ func (nm *NodesManager) ConnectToNode(address string) {
 		log.Printf("[NODE] Connection error to %s: %v", address, err)
 		nm.scheduleReconnect(address)
 	}
+}
+
+// HandleIncomingPeer handles inbound peer WebSocket connections
+func (nm *NodesManager) HandleIncomingPeer(conn *websocket.Conn, address string) {
+	go nm.handlePeerConnection(conn, address)
 }
 
 func (nm *NodesManager) handlePeerConnection(conn *websocket.Conn, address string) {

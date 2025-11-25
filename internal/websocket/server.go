@@ -82,6 +82,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Detect peer connection
+	isPeer := r.URL.Query().Get("peer") == "1"
+	if isPeer && s.nodesManager != nil {
+		peerAddr := conn.RemoteAddr().String()
+		log.Printf("[NODE] Incoming peer connection from %s", peerAddr)
+		s.nodesManager.HandleIncomingPeer(conn, peerAddr)
+		return
+	}
+
 	clientID := uuid.New().String()
 	clientIP := r.RemoteAddr
 	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
