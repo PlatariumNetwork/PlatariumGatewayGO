@@ -162,10 +162,19 @@ func (s *Server) handlePeerMessages(conn *websocket.Conn, clientID string) {
 }
 
 func (s *Server) handleClientMessages(client *Client) {
+	// Keep connection alive by reading messages
+	// Don't exit on first error - keep trying to read
 	for {
 		var msg map[string]interface{}
 		if err := client.Conn.ReadJSON(&msg); err != nil {
-			break
+			// Log error but don't break immediately - might be a temporary issue
+			log.Printf("[SOCKET] Error reading from client %s: %v", client.ID, err)
+			// Check if it's a close error
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				break
+			}
+			// For other errors, continue trying
+			continue
 		}
 
 		msgType, _ := msg["type"].(string)
@@ -174,6 +183,11 @@ func (s *Server) handleClientMessages(client *Client) {
 		switch msgType {
 		case "newTransaction":
 			s.handleNewTransaction(data)
+		case "ping":
+			// Respond to ping
+			client.Conn.WriteJSON(map[string]interface{}{
+				"type": "pong",
+			})
 		}
 	}
 }
