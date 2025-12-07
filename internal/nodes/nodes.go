@@ -44,6 +44,7 @@ type NodesManager struct {
 	peerSocketsRegistry map[string]map[string]*SocketInfo
 	reconnectTimers     map[string]*time.Timer
 	getLocalSockets     func() []*SocketInfo
+	wsMessageHandler    func(map[string]interface{}) // Handler for WebSocket messages from peers
 	seenEvents          map[string]time.Time // For duplicate detection
 	eventMutex          sync.RWMutex
 
@@ -102,6 +103,13 @@ func (nm *NodesManager) SetLocalSocketsGetter(getter func() []*SocketInfo) {
 	nm.mu.Lock()
 	defer nm.mu.Unlock()
 	nm.getLocalSockets = getter
+}
+
+// SetWSMessageHandler sets the handler for WebSocket messages from peers
+func (nm *NodesManager) SetWSMessageHandler(handler func(map[string]interface{})) {
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
+	nm.wsMessageHandler = handler
 }
 
 // GetConnectedNodes returns all connected peer nodes
@@ -603,11 +611,27 @@ func (nm *NodesManager) handleBlockchainEvent(data map[string]interface{}) {
 		nm.eventMutex.Unlock()
 	}
 
-	// Re-broadcast to other nodes
+	// Handle message routing events - notify WebSocket server
 	eventType, _ := data["eventType"].(string)
 	if eventType == "" {
 		eventType, _ = data["type"].(string) // Fallback
 	}
+	
+	if eventType == "message:route" {
+		// Get WebSocket server message handler if available
+		nm.mu.RLock()
+		handler := nm.wsMessageHandler
+		nm.mu.RUnlock()
+		
+		if handler != nil {
+			eventData, _ := data["data"].(map[string]interface{})
+			handler(eventData)
+		}
+		// Don't check for duplicates on message routing - messages should be delivered
+		return
+	}
+
+	// Re-broadcast to other nodes
 	nm.BroadcastBlockchainEvent(eventType, data, originNodeID)
 }
 
