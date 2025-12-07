@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
 	"platarium-gateway-go/internal/blockchain"
+	"platarium-gateway-go/internal/core"
 	"platarium-gateway-go/internal/nodes"
 	"platarium-gateway-go/internal/websocket"
 
@@ -16,13 +18,24 @@ type Handler struct {
 	blockchain   *blockchain.Blockchain
 	nodesManager *nodes.NodesManager
 	wsServer     *websocket.Server
+	rustCore     *core.RustCore
 }
 
 func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket.Server) *Handler {
+	// Initialize Rust Core (optional - will work without it)
+	rustCore, err := core.NewRustCore()
+	if err != nil {
+		log.Printf("[WARN] Rust Core not available: %v. Some features may be limited.", err)
+		rustCore = nil
+	} else {
+		log.Println("[INFO] Rust Core initialized successfully")
+	}
+	
 	return &Handler{
 		blockchain:   bc,
 		nodesManager: nm,
 		wsServer:     ws,
+		rustCore:     rustCore,
 	}
 }
 
@@ -192,6 +205,36 @@ func (h *Handler) SendTransaction(w http.ResponseWriter, r *http.Request) {
 			"error": "Invalid request body",
 		})
 		return
+	}
+	
+	// Verify signature if Rust Core is available and signature is provided
+	if h.rustCore != nil {
+		signature, hasSig := txData["signature"].(string)
+		pubKey, hasPubKey := txData["from"].(string) // Using 'from' as public key for now
+		
+		if hasSig && hasPubKey && signature != "" {
+			// Create message for verification (without signature)
+			verifyMsg := map[string]interface{}{
+				"from":      getString(txData, "from"),
+				"to":        getString(txData, "to"),
+				"amount":    getString(txData, "amount"),
+				"nonce":     getInt(txData, "nonce"),
+				"timestamp": txData["timestamp"],
+				"type":      getString(txData, "type"),
+			}
+			
+			// Verify signature using Rust Core
+			verified, err := h.rustCore.VerifySignature(verifyMsg, signature, pubKey)
+			if err != nil {
+				log.Printf("[WARN] Signature verification error: %v", err)
+			} else if !verified {
+				jsonResponse(w, http.StatusBadRequest, map[string]string{
+					"error": "Invalid signature",
+				})
+				return
+			}
+			log.Printf("[INFO] Transaction signature verified using Rust Core")
+		}
 	}
 	
 	// Create transaction
