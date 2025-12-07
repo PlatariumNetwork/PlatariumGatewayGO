@@ -25,9 +25,11 @@ type Server struct {
 	port         int
 	blockchain   *blockchain.Blockchain
 	nodesManager *nodes.NodesManager
-	clients      map[string]*Client
+	clients      map[string]*Client          // by client ID
+	clientsByAddr map[string]*Client         // by wallet address
 	mu           sync.RWMutex
 	server       *http.Server
+	messageHandler func(map[string]interface{}) // Handler for incoming peer messages
 }
 
 // Client represents a WebSocket client connection
@@ -36,6 +38,7 @@ type Client struct {
 	Conn        *websocket.Conn
 	IPAddress   string
 	ConnectedAt time.Time
+	Address     string // Wallet address (Platarium address like Px...)
 	mu          sync.Mutex
 }
 
@@ -46,10 +49,14 @@ func NewServer(port int, bc *blockchain.Blockchain, nm *nodes.NodesManager) *Ser
 		blockchain:   bc,
 		nodesManager: nm,
 		clients:      make(map[string]*Client),
+		clientsByAddr: make(map[string]*Client),
 	}
 
 	// Set local sockets getter
 	nm.SetLocalSocketsGetter(s.GetConnectedSockets)
+	
+	// Set message handler for peer messages
+	nm.SetWSMessageHandler(s.HandleIncomingPeerMessage)
 
 	return s
 }
@@ -102,6 +109,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		Conn:        conn,
 		IPAddress:   clientIP,
 		ConnectedAt: time.Now(),
+		Address:     "", // Will be set when client registers their address
 	}
 
 	s.mu.Lock()
@@ -122,7 +130,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Cleanup on disconnect
 	defer func() {
 		s.mu.Lock()
-		delete(s.clients, clientID)
+		// Remove from clients map
+		if client, exists := s.clients[clientID]; exists {
+			delete(s.clients, clientID)
+			// Remove from address map if registered
+			if client.Address != "" {
+				delete(s.clientsByAddr, client.Address)
+			}
+		}
 		s.mu.Unlock()
 
 		log.Printf("[SOCKET] Client disconnected: %s", clientID)
@@ -188,6 +203,12 @@ func (s *Server) handleClientMessages(client *Client) {
 			client.Conn.WriteJSON(map[string]interface{}{
 				"type": "pong",
 			})
+		case "register":
+			// Client registers their wallet address
+			s.handleClientRegister(client, data)
+		case "message":
+			// Direct message between clients
+			s.handleDirectMessage(client, data)
 		}
 	}
 }
