@@ -1,0 +1,1056 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Platarium - nodes L1/L2, Mempool, analytics</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, sans-serif; padding: 16px; }
+    .header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #30363d; }
+    .header h1 { margin: 0; font-size: 1.35rem; font-weight: 600; }
+    .api-status { font-size: 0.85rem; padding: 6px 12px; border-radius: 6px; background: #21262d; }
+    .api-status.ok { color: #3fb950; }
+    .api-status.fail { color: #f85149; }
+    .btn { padding: 8px 14px; border-radius: 6px; border: none; font-size: 0.9rem; cursor: pointer; background: #238636; color: #fff; font-weight: 500; }
+    .btn:hover { background: #2ea043; }
+    .btn.blue { background: #388bfd; }
+    .btn.blue:hover { background: #58a6ff; }
+    .btn.orange { background: #d29922; }
+    .btn.orange:hover { background: #e3b341; }
+    .section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .section h2 { font-size: 1rem; margin: 0 0 12px 0; color: #8b949e; font-weight: 600; }
+    .flow-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+    .flow-box { flex: 1; min-width: 200px; min-height: 80px; border-radius: 8px; padding: 12px; border: 2px dashed #30363d; }
+    .flow-box.mempool { border-color: #d29922; background: #d2992233; }
+    .flow-box.l1-block { border-color: #388bfd; background: #388bfd33; }
+    .flow-box.chain { border-color: #3fb950; background: #3fb95033; }
+    .flow-arrow { color: #8b949e; font-size: 1.5rem; }
+    .tx-card { font-size: 0.8rem; padding: 8px 10px; margin-bottom: 6px; background: #0d1117; border-radius: 6px; border-left: 3px solid #388bfd; }
+    .tx-card .hash { color: #8b949e; }
+    .tx-card .from-to { color: #e6edf3; }
+    .form-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .form-row label { min-width: 70px; color: #8b949e; font-size: 0.9rem; }
+    .form-row input { padding: 6px 10px; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; width: 140px; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+    .tabs button { padding: 6px 12px; border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #8b949e; cursor: pointer; font-size: 0.85rem; }
+    .tabs button.active { background: #388bfd; color: #fff; border-color: #388bfd; }
+    .analytics-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    .analytics-table th, .analytics-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #21262d; }
+    .analytics-table th { color: #8b949e; font-weight: 500; }
+    .analytics-table td { color: #e6edf3; }
+    .analytics-table .num { text-align: right; }
+    .nodes-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+    .node-box { border-radius: 6px; padding: 8px; border: 2px solid; text-align: center; font-size: 0.7rem; transition: all 0.2s; }
+    .node-box.idle { background: #f8514933; border-color: #f85149; }
+    .node-box.l1 { background: #388bfd33; border-color: #388bfd; }
+    .node-box.l2 { background: #3fb95033; border-color: #3fb950; }
+    .node-box .role { font-weight: 700; text-transform: uppercase; margin-top: 2px; }
+    .node-box .vote { margin-top: 2px; }
+    .node-box .vote.yes { color: #3fb950; }
+    .node-box .vote.no { color: #f85149; }
+    .legend { display: flex; gap: 16px; margin-top: 8px; font-size: 0.8rem; color: #8b949e; flex-wrap: wrap; }
+    .legend span { display: inline-flex; align-items: center; gap: 4px; }
+    .legend .dot { width: 10px; height: 10px; border-radius: 2px; }
+    .legend .dot.idle { background: #f85149; }
+    .legend .dot.l1 { background: #388bfd; }
+    .collapse-section { margin: 12px 0; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
+    .collapse-summary { font-size: 0.95rem; font-weight: 600; color: #8b949e; padding: 10px 12px; cursor: pointer; list-style: none; user-select: none; display: flex; align-items: center; gap: 8px; }
+    .collapse-summary::-webkit-details-marker { display: none; }
+    .collapse-summary::before { content: '▶'; font-size: 0.7rem; transition: transform 0.2s; }
+    .collapse-section[open] .collapse-summary::before { transform: rotate(90deg); }
+    .collapse-summary:hover { background: #21262d; color: #e6edf3; }
+    .collapse-content { padding: 0 12px 12px 12px; border-top: 1px solid #21262d; }
+    .legend .dot.l2 { background: #3fb950; }
+    .stat-item .label { font-size: 0.8rem; color: #8b949e; margin-bottom: 4px; }
+    .stat-item .value { font-size: 1.1rem; font-weight: 600; }
+    .stat-item .value.green { color: #3fb950; }
+    .log-list { max-height: 260px; overflow-y: auto; font-size: 0.8rem; background: #0d1117; border-radius: 6px; border: 1px solid #21262d; padding: 8px; }
+    .log-item { padding: 4px 0; border-bottom: 1px solid #161b22; }
+    .log-item:last-child { border-bottom: none; }
+    .log-time { color: #8b949e; margin-right: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 0.75rem; }
+    .log-type { font-weight: 600; margin-right: 4px; }
+    .log-type.ev { color: #58a6ff; }
+    .log-type.msg { color: #3fb950; }
+    .log-type.err { color: #f85149; }
+    .log-payload { color: #e6edf3; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Platarium - Mempool, blocks, L1/L2</h1>
+    <span class="api-status" id="apiStatus">Loading…</span>
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+      <span class="api-status" id="wsStatus" style="margin-right:8px; cursor:pointer;" title="Click to reconnect. Open page via http://localhost:2812/web/nodes-viz.html so WebSocket works.">Socket: -</span>
+      <button class="btn blue" id="btnLoadNodes">Refresh nodes</button>
+      <button class="btn orange" id="btnSimulateL1L2" title="One cycle: TX from mempool → L1 (67% yes) → block → L2 (70% yes) → chain">Run L1→L2</button>
+      <span style="font-size:0.75rem; color:#8b949e; margin-left:8px;">Section 1: wallet → faucet → send TX (real flow)</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>1. Transaction (real flow: wallet → faucet → send)</h2>
+    <p style="font-size:0.85rem; color:#8b949e; margin:0 0 10px 0;">Seed generation (Core) → get balance from faucet → send amount with blockchain checks. No demo data.</p>
+    <div class="form-row" style="align-items:flex-start;">
+      <div style="flex:1; min-width:280px;">
+        <div class="form-row">
+          <label>Step 1</label>
+          <button type="button" class="btn blue" id="btnGenerateWallet">Generate wallet</button>
+        </div>
+        <div id="walletInfo" style="display:none; margin-top:8px; padding:10px; background:#0d1117; border-radius:6px; font-size:0.85rem;">
+          <div class="form-row"><label>Address (pubkey)</label><input id="inpMyAddress" readonly style="flex:1; max-width:400px;"></div>
+          <div class="form-row"><label>Mnemonic</label><input id="inpMnemonic" type="password" readonly style="flex:1;"><button type="button" class="btn" id="btnToggleMnemonic" style="margin-left:4px;">Show</button></div>
+          <div class="form-row"><label>Alpha-code</label><input id="inpAlphanumeric" readonly style="flex:1;"></div>
+        </div>
+        <div class="form-row" style="margin-top:12px;">
+          <label>Step 2</label>
+          <button type="button" class="btn orange" id="btnFaucet" disabled title="Generate wallet first">Get from faucet</button>
+          <span id="balanceDisplay" style="margin-left:12px; color:#8b949e;">Balance: -</span>
+        </div>
+        <p style="font-size:0.8rem; color:#8b949e; margin:4px 0 0 0;">Faucet adds TX into mempool; confirm L1→L2 to credit the balance.</p>
+        <div class="form-row" style="margin-top:12px;">
+          <label>Step 3</label>
+          <input id="inpTo" placeholder="Recipient address" style="width:200px;">
+          <input id="inpAmount" type="number" placeholder="Amount μPLP" value="100" min="1" style="width:120px;">
+          <input id="inpFee" type="number" placeholder="Fee" value="1" min="1" style="width:80px;">
+          <button type="button" class="btn" id="btnSendSigned">Send (signed)</button>
+          <button type="button" class="btn orange" id="btnAutoScenario" style="margin-left:8px;">Auto: wallet + faucet + 4 TX</button>
+        </div>
+        <div id="sendStatus" style="margin-top:8px; font-size:0.85rem;"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>2. Automation (optional)</h2>
+    <div class="form-row" style="flex-wrap: wrap; gap: 16px;">
+      <label style="display:flex; align-items:center; gap:8px; font-size:0.9rem;">
+        <input type="checkbox" id="chkAutoL1L2"> Auto L1/L2 (every 6s: L1 collects block → L2 confirms when mempool has TX)
+      </label>
+      <label style="display:flex; align-items:center; gap:8px; font-size:0.9rem;">
+        <input type="checkbox" id="chkAutoSendTx"> Auto-generate and send TX (every 5s: one signed TX to random address; requires wallet and balance)
+      </label>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>3. Transaction flow: L1 (collect) → L2 (confirm)</h2>
+    <div class="flow-row">
+      <div class="flow-box mempool">
+        <strong>Mempool (pending)</strong>
+        <div id="mempoolList"></div>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        <button class="btn blue" id="btnL1Collect">L1: Collect block</button>
+        <small style="color:#8b949e">Move TX from mempool into block for L2</small>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-box l1-block">
+        <strong>Block for L2 (collected by L1)</strong>
+        <div id="pendingBlockList"></div>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        <button class="btn orange" id="btnL2Confirm">L2: Confirm block</button>
+        <small style="color:#8b949e">Send block into chain</small>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-box chain">
+        <strong>Chain (confirmed)</strong>
+        <div id="chainList"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>4. Network nodes (L1/L2 - real voting)</h2>
+    <p style="font-size:0.85rem; color:#8b949e; margin:0 0 6px 0;"><strong>Decentralized network:</strong> it does not matter which node receives the transaction - it goes to the shared mempool and is synchronized between all nodes. Nodes take TX from mempool; the reputation-based protocol (selection weight) chooses who performs L1 (block collect) and L2 (confirmation).</p>
+    <p style="font-size:0.8rem; color:#8b949e; margin:0 0 8px 0;">L1: block is collected only if ≥67% “yes”. L2: block is confirmed only if ≥70% “yes”. Votes flow through peers; reputation is updated from votes.</p>
+    <details class="collapse-section" id="details41">
+      <summary class="collapse-summary">4.1 Fee distribution and node earnings (from Core)</summary>
+      <div class="collapse-content">
+        <p style="font-size:0.85rem; color:#8b949e; margin:0 0 8px 0;">Formula: Burn % + Treasury % + L1 % + L2 % = 100. Implementation same as Core (node rating - Core formula).</p>
+        <div id="rewardSummary" style="font-size:0.85rem; margin-bottom:10px; padding:8px; background:#0d1117; border-radius:6px;">
+          <span>Розподіл: Спалення <strong id="cfgBurn">0</strong>% → Скарбниця <strong id="cfgTreasury">20</strong>% → L1 <strong id="cfgL1">40</strong>% → L2 <strong id="cfgL2">40</strong>%</span><br>
+          <span>Спалено всього: <strong id="totalBurned">0</strong></span> | <span>Скарбниця всього: <strong id="totalTreasury">0</strong></span><br>
+          <span style="font-size:0.8rem; color:#8b949e;">L1/L2 винагорода ділиться між усіма, хто голосував «так» (пропорційно рейтингу); мін. 1 на ноду, якщо пул достатній.</span>
+        </div>
+        <table class="analytics-table" style="max-width:420px; margin-bottom:16px;">
+          <thead>
+            <tr><th>Node</th><th class="num">L1 earned</th><th class="num">L2 earned</th></tr>
+          </thead>
+          <tbody id="nodeEarningsBody"></tbody>
+        </table>
+      </div>
+    </details>
+    <details class="collapse-section" id="details42">
+      <summary class="collapse-summary">4.2 Node rating (Core formula)</summary>
+      <div class="collapse-content">
+        <p style="font-size:0.85rem; color:#8b949e; margin:0 0 8px 0;">Reputation = Uptime×30% + Latency×20% + VoteAccuracy×30% + Stake×20%. Selection weight = reputation×(1−load). Values 0…1.</p>
+        <table class="analytics-table" style="max-width:560px;">
+          <thead>
+            <tr><th>Node</th><th class="num">Reputation</th><th class="num">Selection weight</th><th class="num">Votes (yes/total)</th></tr>
+          </thead>
+          <tbody id="nodeRatingsBody"></tbody>
+        </table>
+      </div>
+    </details>
+    <p style="font-size:0.75rem; color:#8b949e; margin:6px 0 0 0;">Rating and votes are updated after L1/L2 rounds. If “-”: click “Refresh nodes”, then “Run L1→L2” (when mempool has TX). Grid below shows who voted in the last L1/L2 round.</p>
+    <div style="margin-top:10px; padding:8px; background:#0d1117; border-radius:6px; font-size:0.85rem;">
+      <strong>Load test (Core):</strong> selection weight = reputation×(1−load); with high load <strong>fewer nodes vote</strong> (faster round). Set load for this node -
+      <input type="number" id="inpCurrentTasks" placeholder="currentTasks" min="0" style="width:70px; margin:0 4px;" value="0">
+      /
+      <input type="number" id="inpMaxCapacity" placeholder="maxCapacity" min="1" style="width:70px; margin:0 4px;" value="10">
+      <button type="button" class="btn" id="btnTestSetLoad" style="margin-left:8px;">Set load</button>
+      <span id="testSetLoadResult" style="margin-left:8px; color:#8b949e;"></span>
+    </div>
+    <div class="legend">
+      <span><i class="dot idle"></i> Not selected</span>
+      <span><i class="dot l1"></i> L1</span>
+      <span><i class="dot l2"></i> L2</span>
+    </div>
+    <div class="nodes-grid" id="nodesGrid"></div>
+  </div>
+
+  <div class="section">
+    <h2>5. Blockchain metrics (load, fees, consensus)</h2>
+    <div class="stats-grid" id="metricsGrid" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:12px;">
+      <div class="stat-item"><div class="label">Transactions in chain</div><div class="value" id="mChainTx">0</div></div>
+      <div class="stat-item"><div class="label">In mempool</div><div class="value" id="mMempool">0</div></div>
+      <div class="stat-item"><div class="label">In block (waiting L2)</div><div class="value" id="mPending">0</div></div>
+      <div class="stat-item"><div class="label">Fees collected</div><div class="value green" id="mFees">0</div></div>
+      <div class="stat-item"><div class="label">Last block</div><div class="value" id="mLastBlock">0</div></div>
+      <div class="stat-item"><div class="label">Consensus (last block)</div><div class="value" id="mConsensus" style="font-size:0.85rem;">-</div></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>6. Full analytics (blocks, voting, fees, time)</h2>
+    <p style="font-size:0.85rem; color:#8b949e; margin:0 0 8px 0;">Click on a block number to open a detailed page in a new tab (which TX are in block, L1/L2 miners, consensus log). <a href="#" id="openAnalyticsNewTab" style="color:#58a6ff;">Open full analytics in new tab</a>.</p>
+    <table class="analytics-table">
+      <thead>
+        <tr>
+          <th>Block</th>
+          <th class="num">Time (unix)</th>
+          <th class="num">TX in block</th>
+          <th class="num">Fees</th>
+          <th class="num">L1 yes</th>
+          <th class="num">L1 no</th>
+          <th class="num">L2 yes</th>
+          <th class="num">L2 no</th>
+          <th class="num">Time (ms)</th>
+        </tr>
+      </thead>
+      <tbody id="analyticsBody"></tbody>
+    </table>
+  </div>
+
+  <p style="font-size:0.85rem; color:#8b949e;">Balance and history per address: click on address in TX (mempool, block, chain) - opens separate <a href="address.html" style="color:#58a6ff;">wallet</a> page.</p>
+
+  <div class="section">
+    <h2>7. Last 50 node messages (WebSocket)</h2>
+    <p style="font-size:0.8rem; color:#8b949e; margin:0 0 8px 0;">
+      Here you see the latest WebSocket events from the node: connections, errors and messages
+      (<code>mempoolUpdate</code>, <code>l1BlockCollected</code>, <code>transactionProcessed</code>, <code>blockConfirmed</code>, etc).
+      This helps understand what the node is actually sending.
+    </p>
+    <div id="wsLog" class="log-list">
+      <div class="log-item">
+        <span class="log-time">–</span>
+        <span class="log-type ev">INFO</span>
+        <span class="log-payload">Waiting for WebSocket events…</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      var q = new URLSearchParams(window.location.search);
+      window.API = q.get('api') || window.location.origin;
+      if (!window.API || window.API === 'null' || window.API === 'file://' || window.API === '' || window.location.protocol === 'file:') window.API = 'http://localhost:2812';
+    })();
+    var API = window.API;
+    var nodes = [];
+    var thisNodeId = '';
+    var analytics = []; // legacy, replaced by analyticsVotes + /api/blocks
+
+    function el(id) { return document.getElementById(id); }
+    var FETCH_TIMEOUT_MS = 60000;
+    var POST_TIMEOUT_MS = 120000;
+    function timeoutSignal(ms) {
+      if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) return AbortSignal.timeout(ms);
+      var c = new AbortController();
+      setTimeout(function() { c.abort(); }, ms);
+      return c.signal;
+    }
+    function get(path) {
+      return fetch(API + path, { signal: timeoutSignal(FETCH_TIMEOUT_MS) }).then(function(r) {
+        if (!r.ok) return r.text().then(function(t) { throw new Error(r.status + ' ' + (t || r.statusText).slice(0, 80)); });
+        return r.json();
+      });
+    }
+    function post(path, body) {
+      return fetch(API + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: timeoutSignal(POST_TIMEOUT_MS)
+      }).then(function(r) {
+        if (!r.ok) return r.text().then(function(t) { throw new Error(r.status + ' ' + (t || r.statusText)); });
+        return r.json();
+      });
+    }
+
+    function status(ok, text) {
+      var s = el('apiStatus');
+      s.textContent = text;
+      s.className = 'api-status ' + (ok ? 'ok' : 'fail');
+    }
+    function wsStatus(connected, text) {
+      var s = el('wsStatus');
+      s.textContent = 'Socket: ' + (text || (connected ? 'connected' : 'disconnected'));
+      s.className = 'api-status ' + (connected ? 'ok' : 'fail');
+    }
+
+    var ws = null;
+    var pollTimer = null;
+    var POLL_FALLBACK_MS = 15000;
+    var wsLogEntries = [];
+
+    function wsUrlForBrowser(apiBase, nodeAddress) {
+      if (!nodeAddress || typeof nodeAddress !== 'string') return null;
+      try {
+        var u = new URL(nodeAddress);
+        var pageOrigin = window.location.origin;
+        var pageUrl = pageOrigin.startsWith('http') ? new URL(pageOrigin) : null;
+        if (u.hostname === '0.0.0.0') {
+          u.hostname = pageUrl ? pageUrl.hostname : 'localhost';
+          return u.toString();
+        }
+        if (pageUrl && u.hostname !== pageUrl.hostname) {
+          u.hostname = pageUrl.hostname;
+          return u.toString();
+        }
+        return nodeAddress;
+      } catch (e) { return nodeAddress; }
+    }
+
+    var wsConnectTimeout = null;
+
+    function appendWsLog(kind, info, payload) {
+      try {
+        var ts = new Date();
+        var timeStr = ts.toISOString().split('T')[1].replace('Z', '');
+        var entry = {
+          time: timeStr,
+          kind: kind || 'INFO',
+          info: info || '',
+          payload: payload != null ? payload : null
+        };
+        wsLogEntries.push(entry);
+        if (wsLogEntries.length > 50) wsLogEntries = wsLogEntries.slice(-50);
+        var container = el('wsLog');
+        if (!container) return;
+        container.innerHTML = wsLogEntries.map(function(e) {
+          var typeClass = e.kind === 'MSG' ? 'msg' : (e.kind === 'ERR' ? 'err' : 'ev');
+          var payloadStr = '';
+          if (e.payload != null) {
+            try { payloadStr = typeof e.payload === 'string' ? e.payload : JSON.stringify(e.payload); }
+            catch (err) { payloadStr = String(e.payload); }
+          }
+          return '<div class="log-item">'
+            + '<span class="log-time">' + e.time + '</span>'
+            + '<span class="log-type ' + typeClass + '">' + e.kind + '</span>'
+            + '<span class="log-payload">' + (e.info ? e.info + (payloadStr ? ': ' : '') : '') + (payloadStr || '') + '</span>'
+            + '</div>';
+        }).join('');
+        container.scrollTop = container.scrollHeight;
+      } catch (e) {
+        // ignore logging errors
+      }
+    }
+    function connectWebSocket() {
+      wsStatus(false, 'connecting…');
+      get('/network').then(function(d) {
+        var rawUrl = d.nodeAddress;
+        if (!rawUrl || typeof WebSocket === 'undefined') { wsStatus(false, 'no URL'); return; }
+        var wsUrl = wsUrlForBrowser(API, rawUrl);
+        if (!wsUrl) { wsStatus(false, 'no URL'); return; }
+        try {
+          if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+          if (wsConnectTimeout) { clearTimeout(wsConnectTimeout); wsConnectTimeout = null; }
+          appendWsLog('EV', 'CONNECT', { url: wsUrl });
+          ws = new WebSocket(wsUrl);
+          wsConnectTimeout = setTimeout(function() {
+            if (ws && ws.readyState === WebSocket.CONNECTING) {
+              try { ws.close(); } catch (e) {}
+              ws = null;
+              wsStatus(false, 'connect timeout');
+              appendWsLog('ERR', 'CONNECT_TIMEOUT', null);
+            }
+            wsConnectTimeout = null;
+          }, 8000);
+          ws.onopen = function() {
+            if (wsConnectTimeout) { clearTimeout(wsConnectTimeout); wsConnectTimeout = null; }
+            wsStatus(true);
+            appendWsLog('EV', 'OPEN', null);
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+            refreshMempool(); refreshPendingBlock(); refreshChain(); refreshAnalytics(); refreshMetrics();
+          };
+          ws.onmessage = function(ev) {
+            var msg;
+            try { msg = JSON.parse(ev.data); } catch (e) { return; }
+            appendWsLog('MSG', msg.type || 'message', msg);
+            var type = msg.type;
+            var data = msg.data || {};
+            if (type === 'mempoolUpdate') {
+              refreshMempool(); refreshMetrics();
+            } else if (type === 'l1BlockCollected') {
+              refreshMempool(); refreshPendingBlock(); refreshMetrics();
+              refreshLastVotes(); refreshNodeRatings();
+            } else if (type === 'transactionProcessed') {
+              refreshPendingBlock(); refreshChain(); refreshAnalytics(); refreshMetrics();
+            } else if (type === 'blockConfirmed') {
+              refreshPendingBlock(); refreshChain(); refreshAnalytics(); refreshMetrics();
+              refreshNodeEarnings();
+            }
+          };
+          ws.onclose = function() {
+            if (wsConnectTimeout) { clearTimeout(wsConnectTimeout); wsConnectTimeout = null; }
+            ws = null;
+            wsStatus(false);
+            appendWsLog('EV', 'CLOSE', null);
+            if (!pollTimer) pollTimer = setInterval(runPoll, POLL_FALLBACK_MS);
+          };
+          ws.onerror = function(ev) {
+            wsStatus(false, 'error');
+            appendWsLog('ERR', 'ERROR', null);
+          };
+        } catch (e) {
+          wsStatus(false, e.message || 'помилка');
+          appendWsLog('ERR', 'EXCEPTION', e && e.message ? e.message : String(e));
+        }
+      }).catch(function(e) {
+        var msg = 'no connection';
+        if (e && e.message) {
+          if (e.message.indexOf('Failed to fetch') !== -1) msg = 'no connection to ' + API;
+          else if (e.message.indexOf('timed out') !== -1 || e.name === 'TimeoutError') msg = 'timeout (many nodes - click to retry)';
+          else msg = e.message;
+        }
+        wsStatus(false, msg);
+      });
+    }
+
+    function errMsg(e) { return e && e.message ? e.message : 'network'; }
+    function shortAddr(addr) {
+      if (!addr) return '?';
+      if (addr.length <= 10) return addr;
+      return addr.slice(0, 4) + '…' + addr.slice(-4);
+    }
+
+    function refreshMempool() {
+      get('/api/mempool').then(function(d) {
+        var list = el('mempoolList');
+        var arr = d.mempool || [];
+        list.innerHTML = arr.length ? arr.map(function(tx) {
+          var from = tx.from || '';
+          var to = tx.to || '';
+          var fromHtml = from ? '<a href="address.html?address=' + encodeURIComponent(from) + '">' + shortAddr(from) + '</a>' : '';
+          var toHtml = to ? '<a href="address.html?address=' + encodeURIComponent(to) + '">' + shortAddr(to) + '</a>' : '';
+          return '<div class="tx-card"><span class="hash">' + (tx.hash || '').slice(0,16) + '…</span><br><span class="from-to">' + fromHtml + ' → ' + toHtml + '</span> ' + tx.value + '</div>';
+        }).join('') : '<span style="color:#8b949e">Empty</span>';
+      }).catch(function(e) { el('mempoolList').innerHTML = '<span style="color:#f85149" title="' + (errMsg(e).replace(/"/g,'&quot;')) + '">Error: ' + errMsg(e) + '</span>'; });
+    }
+
+    function refreshPendingBlock() {
+      get('/api/pending-block').then(function(d) {
+        var list = el('pendingBlockList');
+        var arr = d.pendingBlock || [];
+        list.innerHTML = arr.length ? arr.map(function(tx) {
+          var from = tx.from || '';
+          var to = tx.to || '';
+          var fromHtml = from ? '<a href="address.html?address=' + encodeURIComponent(from) + '">' + shortAddr(from) + '</a>' : '';
+          var toHtml = to ? '<a href="address.html?address=' + encodeURIComponent(to) + '">' + shortAddr(to) + '</a>' : '';
+          return '<div class="tx-card"><span class="hash">' + (tx.hash || '').slice(0,16) + '…</span><br><span class="from-to">' + fromHtml + ' → ' + toHtml + '</span> ' + tx.value + '</div>';
+        }).join('') : '<span style="color:#8b949e">Empty (L1 has not collected yet)</span>';
+      }).catch(function(e) { el('pendingBlockList').innerHTML = '<span style="color:#f85149" title="' + (errMsg(e).replace(/"/g,'&quot;')) + '">Error: ' + errMsg(e) + '</span>'; });
+    }
+
+    function refreshChain() {
+      get('/api/transactions').then(function(d) {
+        var list = el('chainList');
+        // Show only last 3 confirmed TX in chain (L1→L2→Chain flow).
+        var arr = (d.transactions || []).slice(-3).reverse();
+        list.innerHTML = arr.length ? arr.map(function(tx) {
+          var from = tx.from || '';
+          var to = tx.to || '';
+          var fromHtml = from ? '<a href="address.html?address=' + encodeURIComponent(from) + '">' + shortAddr(from) + '</a>' : '';
+          var toHtml = to ? '<a href="address.html?address=' + encodeURIComponent(to) + '">' + shortAddr(to) + '</a>' : '';
+          return '<div class="tx-card"><span class="hash">' + (tx.hash || '').slice(0,16) + '…</span><br><span class="from-to">' + fromHtml + ' → ' + toHtml + '</span> ' + tx.value + '</div>';
+        }).join('') : '<span style="color:#8b949e">No TX</span>';
+      }).catch(function(e) { el('chainList').innerHTML = '<span style="color:#f85149" title="' + (errMsg(e).replace(/"/g,'&quot;')) + '">Error: ' + errMsg(e) + '</span>'; });
+    }
+
+    var analyticsVotes = {};
+    function addAnalyticsVote(blockNum, l1y, l1n, l2y, l2n, ms) {
+      analyticsVotes[blockNum] = {l1Yes: l1y, l1No: l1n, l2Yes: l2y, l2No: l2n, durationMs: ms};
+    }
+    function blockDetailUrl(blockNum) {
+      var q = new URLSearchParams(window.location.search);
+      var api = q.get('api') || '';
+      var base = 'block.html';
+      var params = 'block=' + encodeURIComponent(blockNum);
+      if (api) params = 'api=' + encodeURIComponent(api) + '&' + params;
+      return base + '?' + params;
+    }
+    function refreshAnalytics() {
+      get('/api/blocks').then(function(d) {
+        var blocks = d.blocks || [];
+        var tbody = el('analyticsBody');
+        var rows = blocks.slice().sort(function(a, b) { return b.blockNumber - a.blockNumber; });
+        tbody.innerHTML = rows.map(function(b) {
+          var fee = b.totalFees != null ? b.totalFees : 0;
+          var v = analyticsVotes[b.blockNumber] || {};
+          var l1y = b.l1Yes != null ? b.l1Yes : (v.l1Yes != null ? v.l1Yes : '-');
+          var l1n = b.l1No != null ? b.l1No : (v.l1No != null ? v.l1No : '-');
+          var l2y = b.l2Yes != null ? b.l2Yes : (v.l2Yes != null ? v.l2Yes : '-');
+          var l2n = b.l2No != null ? b.l2No : (v.l2No != null ? v.l2No : '-');
+          var dur = (b.durationMs != null ? b.durationMs : v.durationMs) != null ? (b.durationMs != null ? b.durationMs : v.durationMs) + ' ms' : '-';
+          var blockLink = '<a target="_blank" href="' + blockDetailUrl(b.blockNumber) + '">' + b.blockNumber + '</a>';
+          return '<tr><td>' + blockLink + '</td><td class="num">' + b.timestamp + '</td><td class="num">' + (b.txCount || 0) + '</td><td class="num">' + fee + '</td><td class="num">' + l1y + '</td><td class="num">' + l1n + '</td><td class="num">' + l2y + '</td><td class="num">' + l2n + '</td><td class="num">' + dur + '</td></tr>';
+        }).join('');
+      });
+    }
+
+    var SCORE_SCALE = 1000000;
+    function refreshNodeEarnings(stats) {
+      var tbody = el('nodeEarningsBody');
+      if (!tbody) return;
+
+      function updateConfig(d) {
+        var cfg = d || {};
+        if (el('cfgBurn')) el('cfgBurn').textContent = cfg.burnPct != null ? cfg.burnPct : 0;
+        if (el('cfgTreasury')) el('cfgTreasury').textContent = cfg.treasuryPct != null ? cfg.treasuryPct : 20;
+        if (el('cfgL1')) el('cfgL1').textContent = cfg.l1Pct != null ? cfg.l1Pct : 40;
+        if (el('cfgL2')) el('cfgL2').textContent = cfg.l2Pct != null ? cfg.l2Pct : 40;
+        if (el('totalBurned')) el('totalBurned').textContent = (d && d.totalBurned != null) ? d.totalBurned : 0;
+        if (el('totalTreasury')) el('totalTreasury').textContent = (d && d.totalTreasury != null) ? d.totalTreasury : 0;
+      }
+
+      get('/api/fee-distribution').then(function(d) {
+        updateConfig(d);
+        var nodeList = (d && d.nodes) ? d.nodes : [];
+        var earningsMap = {};
+        nodeList.forEach(function(n) { earningsMap[n.nodeId] = n; });
+
+        var allIds = nodes.map(function(n) { return n.id; });
+        nodeList.forEach(function(n) {
+          if (allIds.indexOf(n.nodeId) === -1) allIds.push(n.nodeId);
+        });
+        if (!allIds.length) {
+          tbody.innerHTML = '<tr><td colspan="3">Refresh nodes</td></tr>';
+          return;
+        }
+        tbody.innerHTML = allIds.map(function(id) {
+          var isSelf = id === thisNodeId;
+          var e = earningsMap[id];
+          var l1 = (e && e.l1Earned) ? e.l1Earned : 0;
+          var l2 = (e && e.l2Earned) ? e.l2Earned : 0;
+          var l1Str = (l1 > 0) ? l1 : '-';
+          var l2Str = (l2 > 0) ? l2 : '-';
+          return '<tr><td>' + shortId(id) + (isSelf ? ' <em>(this node)</em>' : '') + '</td><td class="num">' + l1Str + '</td><td class="num">' + l2Str + '</td></tr>';
+        }).join('');
+      }).catch(function() {
+        if (stats) {
+          updateConfig(stats.rewardConfig || {});
+          if (el('totalBurned')) el('totalBurned').textContent = stats.totalBurned || 0;
+          if (el('totalTreasury')) el('totalTreasury').textContent = stats.totalTreasury || 0;
+        }
+        tbody.innerHTML = '<tr><td colspan="3">- (завантажте дані)</td></tr>';
+      });
+    }
+
+    function refreshNodeRatings() {
+      var myId = thisNodeId;
+      var tbody = el('nodeRatingsBody');
+      if (!tbody) return;
+      function renderFromList(list, scale) {
+        if (!list.length) {
+          if (nodes.length) {
+            list = nodes.map(function(n) { return { nodeId: n.id, reputationScore: null, selectionWeight: null, totalVotes: 0, missedVotes: 0 }; });
+          } else {
+            tbody.innerHTML = '<tr><td colspan="4">Refresh nodes (button “Refresh nodes”)</td></tr>';
+            return;
+          }
+        }
+        var scaleVal = scale || SCORE_SCALE;
+        list.sort(function(a, b) {
+          if ((a.nodeId || '') === myId) return -1;
+          if ((b.nodeId || '') === myId) return 1;
+          var idA = (a.nodeId || '').toLowerCase();
+          var idB = (b.nodeId || '').toLowerCase();
+          return idA.localeCompare(idB);
+        });
+        tbody.innerHTML = list.map(function(r) {
+          var rep = (r.reputationScore != null ? r.reputationScore : 0) / scaleVal;
+          var sel = (r.selectionWeight != null ? r.selectionWeight : 0) / scaleVal;
+          var total = r.totalVotes != null ? r.totalVotes : 0;
+          var missed = r.missedVotes != null ? r.missedVotes : 0;
+          var yesCount = total - (missed > 0 ? missed : 0);
+          if (yesCount < 0) yesCount = 0;
+          var votesStr = total ? yesCount + ' / ' + total : '-';
+          var repStr = (r.reputationScore != null) ? rep.toFixed(3) : '-';
+          var selStr = (r.selectionWeight != null) ? sel.toFixed(3) : '-';
+          return '<tr><td>' + shortId(r.nodeId) + (r.nodeId === myId ? ' <em>(ця нода)</em>' : '') + '</td><td class="num">' + repStr + '</td><td class="num">' + selStr + '</td><td class="num">' + votesStr + '</td></tr>';
+        }).join('');
+      }
+      get('/api/node-ratings').then(function(d) {
+        var list = d.ratings || [];
+        renderFromList(list, d.scale);
+      }).catch(function() {
+        if (nodes.length) {
+          renderFromList([], null);
+        } else {
+          tbody.innerHTML = '<tr><td colspan="4">- (load nodes or API timeout)</td></tr>';
+        }
+      });
+    }
+
+    function refreshMetrics() {
+      get('/api/stats').then(function(d) {
+        el('mChainTx').textContent = d.chainTxCount != null ? d.chainTxCount : 0;
+        el('mMempool').textContent = d.mempoolCount != null ? d.mempoolCount : 0;
+        el('mPending').textContent = d.pendingCount != null ? d.pendingCount : 0;
+        el('mFees').textContent = d.totalFees != null ? d.totalFees : 0;
+        el('mLastBlock').textContent = (d.lastBlockNumber != null ? d.lastBlockNumber : 0);
+        var lastNum = d.lastBlockNumber != null ? d.lastBlockNumber : 0;
+        var last = lastNum > 0 ? 'Block #' + lastNum + ' (L1+L2)' : '-';
+        el('mConsensus').textContent = last;
+        refreshNodeEarnings(d);
+        refreshNodeRatings();
+        refreshLastVotes();
+      }).catch(function() {
+        el('mChainTx').textContent = '-'; el('mMempool').textContent = '-'; el('mPending').textContent = '-';
+        el('mFees').textContent = '-'; el('mLastBlock').textContent = '-'; el('mConsensus').textContent = '-';
+        refreshNodeEarnings(null);
+      });
+    }
+
+    function loadNodes() {
+      get('/network').then(function(data) {
+        thisNodeId = data.nodeId || '';
+        var list = [];
+        if (data.nodeId) list.push({ id: data.nodeId, address: data.nodeAddress || '', isSelf: true });
+        (data.connectedNodes || []).forEach(function(n) { list.push({ id: n.nodeId || n.node_id, address: n.address || '' }); });
+        nodes = list.map(function(n, i) { return { index: i, id: n.id, role: null, voted: null }; });
+        status(true, 'Nodes: ' + nodes.length);
+        renderNodes();
+        refreshNodeEarnings();
+        refreshNodeRatings();
+      }).catch(function(e) {
+        nodes = []; thisNodeId = '';
+        var errMsg = e && e.message ? e.message : 'Error';
+        if (errMsg.indexOf('timed out') !== -1 || (e && e.name === 'TimeoutError')) errMsg = 'Timeout (many nodes). Click “Refresh nodes” again.';
+        else errMsg = 'Error: ' + errMsg;
+        status(false, errMsg);
+        renderNodes();
+        refreshNodeEarnings();
+      });
+    }
+
+    function shortId(id) { return !id ? '?' : (id.length > 10 ? id.slice(0,6) + '…' + id.slice(-4) : id); }
+    function renderNodes() {
+      var grid = el('nodesGrid');
+      grid.innerHTML = nodes.map(function(n) {
+        var role = n.role || 'idle';
+        var vote = n.voted === null ? '' : ('<span class="vote ' + (n.voted ? 'yes' : 'no') + '">' + (n.voted ? '✓ Yes' : '✗ No') + '</span>');
+        return '<div class="node-box ' + role + '"><div>' + shortId(n.id) + '</div>' + (n.role ? '<div class="role">' + n.role + '</div>' : '') + vote + '</div>';
+      }).join('');
+    }
+
+    function refreshLastVotes() {
+      get('/api/last-votes').then(function(d) {
+        nodes.forEach(function(node) { node.role = null; node.voted = null; });
+        var l2 = (d.l2 && d.l2.votes) ? d.l2.votes : {};
+        var l1 = (d.l1 && d.l1.votes) ? d.l1.votes : {};
+        nodes.forEach(function(n) {
+          if (l2[n.id] !== undefined) { n.role = 'l2'; n.voted = l2[n.id]; }
+          else if (l1[n.id] !== undefined) { n.role = 'l1'; n.voted = l1[n.id]; }
+        });
+        renderNodes();
+      }).catch(function() {});
+    }
+
+    function runRealL1L2() {
+      if (!nodes.length) { loadNodes(); setTimeout(runRealL1L2, 500); return; }
+      status(true, 'L1→L2: перевірка…');
+      get('/api/stats').then(function(st) {
+        var mempoolCount = st.mempoolCount != null ? st.mempoolCount : 0;
+        var pendingCount = st.pendingCount != null ? st.pendingCount : 0;
+        if (mempoolCount > 0) {
+          status(true, 'L1→L2: збір блоку з mempool (' + mempoolCount + ' TX)…');
+          return post('/api/l1-collect', {}).then(function(d) {
+            if (d.success) {
+              status(true, 'L1 зібрав блок (67% так), TX: ' + (d.moved || 0));
+              refreshMempool(); refreshPendingBlock(); refreshMetrics(); refreshLastVotes(); refreshNodeRatings();
+            } else {
+              var msg = (d.error || 'L1 помилка') + (d.need != null ? ' (потрібно так: ' + d.need + ')' : '');
+              if ((d.error || '').indexOf('mempool') >= 0) {
+                msg = 'Mempool порожній на ноді, що виконує L1. Додайте TX (кнопка «Додати в mempool»), потім знову «Запустити L1→L2».';
+                refreshMempool(); refreshMetrics();
+              }
+              status(false, msg);
+              refreshLastVotes();
+            }
+          });
+        } else if (pendingCount > 0) {
+          status(true, 'L1→L2: підтвердження блоку (L2)…');
+          return Promise.resolve();
+        } else {
+          status(false, 'Mempool порожній - додайте TX, потім запустіть L1→L2');
+          return Promise.resolve();
+        }
+      }).then(function() {
+        return get('/api/stats');
+      }).then(function(st) {
+        var pendingCount = st.pendingCount != null ? st.pendingCount : 0;
+        if (pendingCount > 0) {
+          status(true, 'L2: підтвердження блоку…');
+          return post('/api/l2-confirm', {}).then(function(d) {
+            if (d.success && d.block) {
+              var b = d.block;
+              addAnalyticsVote(b.blockNumber, d.l1Yes || 0, d.l1No || 0, d.l2Yes || 0, d.l2No || 0, 0);
+              status(true, 'L2 підтвердив блок №' + b.blockNumber + ', TX: ' + (d.moved || 0));
+              refreshPendingBlock(); refreshChain(); refreshAnalytics(); refreshMetrics();
+              refreshLastVotes(); refreshNodeRatings(); refreshNodeEarnings();
+            } else {
+              status(false, (d.error || 'L2 помилка') + (d.need != null ? ' (потрібно так: ' + d.need + ')' : ''));
+              refreshLastVotes();
+            }
+          });
+        } else {
+          refreshLastVotes();
+          return Promise.resolve();
+        }
+      }).catch(function(e) {
+        var msg = e.message || 'Помилка L1/L2';
+        if (msg.indexOf('mempool') !== -1 || msg.indexOf('400') === 0) {
+          msg = 'Mempool порожній. Додайте TX (вкладка «Надіслати TX» → «Додати в mempool»), потім «Запустити L1→L2».';
+          refreshMempool(); refreshMetrics();
+        }
+        status(false, msg);
+        refreshMempool(); refreshPendingBlock(); refreshLastVotes();
+      });
+    }
+
+    el('btnLoadNodes').onclick = loadNodes;
+    el('btnSimulateL1L2').onclick = runRealL1L2;
+    if (el('btnTestSetLoad')) {
+      el('btnTestSetLoad').onclick = function() {
+        var cur = parseInt(el('inpCurrentTasks').value, 10) || 0;
+        var max = parseInt(el('inpMaxCapacity').value, 10) || 10;
+        if (max <= 0) max = 10;
+        el('testSetLoadResult').textContent = '…';
+        post('/api/test-set-load', { currentTasks: cur, maxCapacity: max }).then(function(d) {
+          el('testSetLoadResult').textContent = d.message || ('loadScore=' + (d.loadScore != null ? d.loadScore : '') + ', weight=' + (d.selectionWeight != null ? d.selectionWeight : ''));
+          refreshNodeRatings();
+        }).catch(function(e) { el('testSetLoadResult').textContent = 'Помилка: ' + (e.message || ''); });
+      };
+    }
+
+    var walletState = { mnemonic: '', alphanumeric: '', address: '' };
+
+    function showSendStatus(msg, ok) {
+      var s = el('sendStatus');
+      if (!s) return;
+      s.textContent = msg;
+      s.style.color = ok ? '#3fb950' : '#f85149';
+    }
+
+    function refreshMyBalance() {
+      if (!walletState.address) return;
+      get('/pg-bal/' + encodeURIComponent(walletState.address)).then(function(d) {
+        var bal = (d && d.balance) ? d.balance : '0';
+        var elB = el('balanceDisplay');
+        if (elB) elB.textContent = 'Баланс: ' + bal + ' μPLP';
+      }).catch(function() {
+        if (el('balanceDisplay')) el('balanceDisplay').textContent = 'Баланс: -';
+      });
+    }
+
+    if (el('btnGenerateWallet')) {
+      el('btnGenerateWallet').onclick = function() {
+        el('btnGenerateWallet').disabled = true;
+        showSendStatus('Generating wallet (Core)…', true);
+        get('/api/generate-wallet').then(function(d) {
+          walletState = { mnemonic: d.mnemonic || '', alphanumeric: d.alphanumeric || '', address: d.publicKey || d.address || '' };
+          if (el('inpMyAddress')) el('inpMyAddress').value = walletState.address;
+          if (el('inpMnemonic')) el('inpMnemonic').value = walletState.mnemonic;
+          if (el('inpAlphanumeric')) el('inpAlphanumeric').value = walletState.alphanumeric;
+          if (el('walletInfo')) el('walletInfo').style.display = 'block';
+          if (el('btnFaucet')) el('btnFaucet').disabled = false;
+          showSendStatus('Wallet created. Get balance from faucet.', true);
+          refreshMyBalance();
+        }).catch(function(e) {
+          showSendStatus('Error: ' + (e.message || 'Core unavailable'), false);
+        }).finally(function() { el('btnGenerateWallet').disabled = false; });
+      };
+    }
+
+        if (el('btnToggleMnemonic')) {
+      el('btnToggleMnemonic').onclick = function() {
+        var inp = el('inpMnemonic');
+        if (!inp) return;
+        inp.type = inp.type === 'password' ? 'text' : 'password';
+        el('btnToggleMnemonic').textContent = inp.type === 'password' ? 'Show' : 'Hide';
+      };
+    }
+
+    if (el('btnFaucet')) {
+      el('btnFaucet').onclick = function() {
+        if (!walletState.address) { showSendStatus('Generate wallet first', false); return; }
+        el('btnFaucet').disabled = true;
+        showSendStatus('Getting from faucet…', true);
+        post('/api/faucet', { address: walletState.address }).then(function(d) {
+          showSendStatus(d.message || ('Faucet: +' + (d.credited || 0) + ' μPLP'), true);
+          refreshMempool();
+          refreshMyBalance();
+          if (typeof runRealL1L2 === 'function') {
+            showSendStatus('Running L1→L2 to confirm block with faucet TX…', true);
+            runRealL1L2();
+            setTimeout(function() { refreshMyBalance(); refreshMempool(); refreshPendingBlock(); refreshChain(); }, 15000);
+          }
+        }).catch(function(e) {
+          showSendStatus('Faucet error: ' + (e.message || ''), false);
+        }).finally(function() { el('btnFaucet').disabled = false; });
+      };
+    }
+
+    if (el('btnSendSigned')) {
+      el('btnSendSigned').onclick = function() {
+        var to = (el('inpTo') && el('inpTo').value) ? el('inpTo').value.trim() : '';
+        var amount = parseInt((el('inpAmount') && el('inpAmount').value) ? el('inpAmount').value : '0', 10);
+        var fee = parseInt((el('inpFee') && el('inpFee').value) ? el('inpFee').value : '1', 10);
+        if (!walletState.mnemonic || !walletState.alphanumeric || !walletState.address) {
+          showSendStatus('Generate wallet and get balance from faucet first', false);
+          return;
+        }
+        if (!to) { showSendStatus('Specify recipient address', false); return; }
+        if (amount < 1 || fee < 1) { showSendStatus('Amount and fee must be ≥ 1', false); return; }
+        get('/pg-bal/' + encodeURIComponent(walletState.address)).then(function(d) {
+          var bal = parseInt((d && d.balance) ? d.balance : '0', 10);
+          if (bal < amount + fee) {
+            showSendStatus('Insufficient balance: need ' + (amount + fee) + ', have ' + bal, false);
+            return;
+          }
+          showSendStatus('Sending signed TX…', true);
+          var nonce = (walletState.nonce != null ? walletState.nonce : 0);
+          post('/api/demo-sendtx', {
+            mnemonic: walletState.mnemonic,
+            alphanumeric: walletState.alphanumeric,
+            to: to,
+            amount: amount,
+            fee_uplp: fee,
+            nonce: nonce
+          }).then(function(d) {
+            if (d.success) {
+              walletState.nonce = nonce + 1;
+              showSendStatus('TX in mempool (signed by Core)', true);
+              refreshMempool();
+              refreshMyBalance();
+            } else {
+              showSendStatus(d.error || 'Error', false);
+            }
+          }).catch(function(e) {
+            showSendStatus('Error: ' + (e.message || ''), false);
+          });
+        }).catch(function() {
+          showSendStatus('Failed to check balance', false);
+        });
+      };
+    }
+
+    function randomPxAddress() {
+      var hex = '0123456789abcdef';
+      var out = 'Px02';
+      for (var i = 0; i < 60; i++) {
+        out += hex[Math.floor(Math.random() * hex.length)];
+      }
+      return out;
+    }
+
+    function waitForBalance(addr, minAmount, timeoutMs) {
+      return new Promise(function(resolve, reject) {
+        var deadline = Date.now() + (timeoutMs || 30000);
+        function poll() {
+          get('/pg-bal/' + encodeURIComponent(addr)).then(function(d) {
+            var bal = parseInt((d && d.balance) ? d.balance : '0', 10);
+            if (bal >= minAmount) {
+              resolve(bal);
+            } else if (Date.now() > deadline) {
+              reject(new Error('Баланс не з\'явився вчасно'));
+            } else {
+              setTimeout(poll, 3000);
+            }
+          }).catch(function() {
+            if (Date.now() > deadline) reject(new Error('Баланс недоступний'));
+            else setTimeout(poll, 3000);
+          });
+        }
+        poll();
+      });
+    }
+
+    function runAutoScenario() {
+      showSendStatus('Auto: creating wallet…', true);
+      get('/api/generate-wallet').then(function(d) {
+        walletState = { mnemonic: d.mnemonic || '', alphanumeric: d.alphanumeric || '', address: d.publicKey || d.address || '' };
+        if (el('inpMyAddress')) el('inpMyAddress').value = walletState.address;
+        if (el('inpMnemonic')) el('inpMnemonic').value = walletState.mnemonic;
+        if (el('inpAlphanumeric')) el('inpAlphanumeric').value = walletState.alphanumeric;
+        if (el('walletInfo')) el('walletInfo').style.display = 'block';
+        if (el('btnFaucet')) el('btnFaucet').disabled = false;
+        showSendStatus('Auto: wallet created, requesting faucet…', true);
+        return post('/api/faucet', { address: walletState.address });
+      }).then(function(d) {
+        showSendStatus('Faucet: +' + (d.credited || 0) + ' μPLP. Waiting for block confirmation…', true);
+        refreshMempool();
+        if (typeof runRealL1L2 === 'function') runRealL1L2();
+        return waitForBalance(walletState.address, 101, 45000);
+      }).then(function() {
+        showSendStatus('Balance received. Sending 4 TX to random addresses…', true);
+        var targets = [];
+        for (var i = 0; i < 4; i++) targets.push(randomPxAddress());
+        var promises = targets.map(function(to, idx) {
+          return post('/api/demo-sendtx', {
+            mnemonic: walletState.mnemonic,
+            alphanumeric: walletState.alphanumeric,
+            to: to,
+            amount: 25,
+            fee_uplp: 1,
+            nonce: idx
+          });
+        });
+        return Promise.all(promises);
+      }).then(function() {
+        walletState.nonce = 4;
+        showSendStatus('4 TX in mempool (signed by Core). Run L1→L2 or enable auto.', true);
+        refreshMempool();
+      }).catch(function(e) {
+        showSendStatus('Auto scenario: error: ' + (e.message || ''), false);
+      });
+    }
+
+    if (el('btnAutoScenario')) {
+      el('btnAutoScenario').onclick = runAutoScenario;
+    }
+
+    el('btnL1Collect').onclick = function() {
+      post('/api/l1-collect', {}).then(function(d) {
+        if (d.success) {
+          status(true, 'L1 зібрав блок (67% так), TX: ' + (d.moved || 0));
+          refreshMempool(); refreshPendingBlock();
+          refreshLastVotes();
+        } else { status(false, (d.error || 'Помилка') + (d.yes != null ? ' (так: ' + d.yes + ', потрібно: ' + d.need + ')' : '')); }
+      }).catch(function(e) { status(false, e.message || 'Failed to fetch'); refreshMempool(); refreshPendingBlock(); });
+    };
+
+    el('btnL2Confirm').onclick = function() {
+      var t0 = Date.now();
+      post('/api/l2-confirm', {}).then(function(d) {
+        var durationMs = Date.now() - t0;
+        if (d.success && d.block) {
+          var b = d.block;
+          addAnalyticsVote(b.blockNumber, d.l1Yes || 0, d.l1No || 0, d.l2Yes || 0, d.l2No || 0, durationMs);
+          status(true, 'L2 підтвердив блок (70% так) ' + b.blockNumber + ', TX: ' + (d.moved || 0));
+          refreshPendingBlock();
+          refreshChain();
+          refreshAnalytics();
+          refreshLastVotes();
+        } else { status(false, (d.error || 'Помилка') + (d.yes != null ? ' (так: ' + d.yes + ', потрібно: ' + d.need + ')' : '')); }
+      }).catch(function(e) { status(false, e.message || 'Failed to fetch'); refreshPendingBlock(); refreshChain(); });
+    };
+
+    function runPoll() {
+      refreshMempool();
+      refreshPendingBlock();
+      refreshChain();
+      refreshAnalytics();
+      refreshMetrics();
+    }
+    var autoL1L2Timer = null;
+    function runAutoL1L2() {
+      if (!el('chkAutoL1L2') || !el('chkAutoL1L2').checked) return;
+      get('/api/stats').then(function(st) {
+        if ((st.mempoolCount || 0) > 0) {
+          return post('/api/l1-collect', {}).then(function() {
+            refreshMempool(); refreshPendingBlock(); refreshMetrics();
+            refreshLastVotes();
+          });
+        }
+      }).then(function() {
+        return get('/api/stats');
+      }).then(function(st) {
+        if ((st.pendingCount || 0) > 0) {
+          return post('/api/l2-confirm', {}).then(function(d) {
+            if (d.success && d.block) {
+              var b = d.block;
+              addAnalyticsVote(b.blockNumber, d.l1Yes || 0, d.l1No || 0, d.l2Yes || 0, d.l2No || 0, 80);
+              refreshPendingBlock();
+              refreshChain();
+                refreshAnalytics();
+                refreshMetrics();
+                refreshLastVotes();
+            }
+          });
+        }
+      }).catch(function() {});
+    }
+    if (el('chkAutoL1L2')) el('chkAutoL1L2').addEventListener('change', function() {
+      if (el('chkAutoL1L2').checked) {
+        if (!nodes.length) loadNodes();
+        if (!autoL1L2Timer) autoL1L2Timer = setInterval(runAutoL1L2, 6000);
+        runAutoL1L2();
+      } else { if (autoL1L2Timer) { clearInterval(autoL1L2Timer); autoL1L2Timer = null; } }
+    });
+
+    var autoSendTxTimer = null;
+    function runAutoSendTx() {
+      if (!el('chkAutoSendTx') || !el('chkAutoSendTx').checked) return;
+      if (!walletState.mnemonic || !walletState.alphanumeric || !walletState.address) return;
+      get('/pg-bal/' + encodeURIComponent(walletState.address)).then(function(d) {
+        var bal = parseInt((d && d.balance) ? d.balance : '0', 10);
+        if (bal < 102) return;
+        var to = randomPxAddress();
+        var amount = 10 + Math.floor(Math.random() * 41);
+        var nonce = (walletState.nonce != null ? walletState.nonce : 0);
+        walletState.nonce = nonce + 1;
+        post('/api/demo-sendtx', {
+          mnemonic: walletState.mnemonic,
+          alphanumeric: walletState.alphanumeric,
+          to: to,
+          amount: amount,
+          fee_uplp: 1,
+          nonce: nonce
+        }).then(function(d) {
+          if (d.success) { refreshMempool(); refreshMyBalance(); }
+        }).catch(function() {});
+      }).catch(function() {});
+    }
+    if (el('chkAutoSendTx')) el('chkAutoSendTx').addEventListener('change', function() {
+      if (el('chkAutoSendTx').checked) {
+        if (!autoSendTxTimer) autoSendTxTimer = setInterval(runAutoSendTx, 5000);
+        runAutoSendTx();
+      } else { if (autoSendTxTimer) { clearInterval(autoSendTxTimer); autoSendTxTimer = null; } }
+    });
+
+    el('wsStatus').onclick = function() { connectWebSocket(); };
+    var openTab = el('openAnalyticsNewTab');
+    if (openTab) { openTab.href = window.location.pathname + (window.location.search || ''); openTab.target = '_blank'; }
+    loadNodes();
+    runPoll();
+    connectWebSocket();
+  </script>
+</body>
+</html>

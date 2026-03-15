@@ -35,10 +35,11 @@ type SocketInfo struct {
 
 // NodesManager manages peer node connections
 type NodesManager struct {
-	nodeID      string
-	nodeHost    string
-	nodePort    int
-	nodeAddress string
+	nodeID        string
+	nodeHost      string
+	nodePort      int
+	nodeAddress   string
+	restBaseURL   string // e.g. http://localhost:2812 - sent in announce so peers can forward L1/L2 to us
 
 	connectedNodes      map[string]*PeerConnection
 	peerSocketsRegistry map[string]map[string]*SocketInfo
@@ -47,6 +48,21 @@ type NodesManager struct {
 	wsMessageHandler    func(map[string]interface{}) // Handler for WebSocket messages from peers
 	seenEvents          map[string]time.Time // For duplicate detection
 	eventMutex          sync.RWMutex
+
+	// L1/L2 vote callbacks (called before re-broadcast so handler can collect votes / respond with vote)
+	l1ProposalCB       func(blockId, proposerNodeId string, txCount int)
+	l1VoteCB           func(blockId, nodeId string, yes bool)
+	l2ProposalCB       func(blockId, proposerNodeId string)
+	l2VoteCB           func(blockId, nodeId string, yes bool)
+	l1BlockCollectedCB  func(l1BeneficiaryNodeId string) // who gets L1 reward when L2 confirms
+	pendingBlockSyncCB  func(pendingBlock []map[string]interface{}) // sync pending block so any node can run L2
+	mempoolAddCB        func(txMap map[string]interface{})           // add TX to local mempool (sync from peer)
+	l1VoteResultCB      func(votes map[string]bool, accepted bool)
+	l2VoteResultCB      func(votes map[string]bool, accepted bool)
+	feeDistributionCB   func(data map[string]interface{})
+	blockConfirmedCB    func(data map[string]interface{})
+	nodeLoadCB          func(nodeId string, currentTasks, maxCapacity int64) // sync load from peer for committee size
+	voteCBMu            sync.RWMutex
 
 	mu sync.RWMutex
 }
@@ -66,6 +82,7 @@ type PeerConnection struct {
 	Address       string
 	Host          string
 	Port          int
+	RestURL       string // REST API base URL (e.g. http://localhost:2822) for forwarding L1/L2
 	Conn          *websocket.Conn
 	LastPong      time.Time
 	PingFailures  int
@@ -98,6 +115,47 @@ func (nm *NodesManager) GetNodeAddress() string {
 	return nm.nodeAddress
 }
 
+// SetRestBaseURL sets the REST API base URL (e.g. http://localhost:2812) sent in node:announce so peers can forward L1/L2 to this node.
+func (nm *NodesManager) SetRestBaseURL(url string) {
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
+	nm.restBaseURL = url
+}
+
+// GetPeerRestURL returns the REST base URL for a peer by nodeID, or empty if unknown.
+func (nm *NodesManager) GetPeerRestURL(nodeID string) string {
+	nm.mu.RLock()
+	defer nm.mu.RUnlock()
+	if p, ok := nm.connectedNodes[nodeID]; ok && p.RestURL != "" {
+		return p.RestURL
+	}
+	return ""
+}
+
+// getPeerByAddress returns the peer for the given address (caller must lock peer.mu for writes).
+func (nm *NodesManager) getPeerByAddress(address string) *PeerConnection {
+	nm.mu.RLock()
+	defer nm.mu.RUnlock()
+	for _, p := range nm.connectedNodes {
+		if p.Address == address {
+			return p
+		}
+	}
+	return nil
+}
+
+// getPeerByConn returns the peer for the given connection (caller must lock peer.mu for writes).
+func (nm *NodesManager) getPeerByConn(conn *websocket.Conn) *PeerConnection {
+	nm.mu.RLock()
+	defer nm.mu.RUnlock()
+	for _, p := range nm.connectedNodes {
+		if p.Conn == conn {
+			return p
+		}
+	}
+	return nil
+}
+
 // SetLocalSocketsGetter sets the function to get local sockets
 func (nm *NodesManager) SetLocalSocketsGetter(getter func() []*SocketInfo) {
 	nm.mu.Lock()
@@ -110,6 +168,90 @@ func (nm *NodesManager) SetWSMessageHandler(handler func(map[string]interface{})
 	nm.mu.Lock()
 	defer nm.mu.Unlock()
 	nm.wsMessageHandler = handler
+}
+
+// SetL1ProposalCallback sets callback for l1_proposal (blockId, proposerNodeId, txCount). Called when we receive l1_proposal from a peer.
+func (nm *NodesManager) SetL1ProposalCallback(fn func(blockId, proposerNodeId string, txCount int)) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.l1ProposalCB = fn
+}
+
+// SetL1VoteCallback sets callback for l1_vote (blockId, nodeId, yes). Called when we receive l1_vote.
+func (nm *NodesManager) SetL1VoteCallback(fn func(blockId, nodeId string, yes bool)) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.l1VoteCB = fn
+}
+
+// SetL2ProposalCallback sets callback for l2_proposal (blockId, proposerNodeId). Called when we receive l2_proposal from a peer.
+func (nm *NodesManager) SetL2ProposalCallback(fn func(blockId, proposerNodeId string)) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.l2ProposalCB = fn
+}
+
+// SetL2VoteCallback sets callback for l2_vote (blockId, nodeId, yes). Called when we receive l2_vote.
+func (nm *NodesManager) SetL2VoteCallback(fn func(blockId, nodeId string, yes bool)) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.l2VoteCB = fn
+}
+
+// SetL1BlockCollectedCallback sets callback for l1BlockCollected (l1BeneficiaryNodeId). So L2 can credit L1 reward to the right node.
+func (nm *NodesManager) SetL1BlockCollectedCallback(fn func(l1BeneficiaryNodeId string)) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.l1BlockCollectedCB = fn
+}
+
+// SetL1VoteResultCallback sets callback for l1_vote_result (votes, accepted) so all nodes show the same L1 result.
+func (nm *NodesManager) SetL1VoteResultCallback(fn func(votes map[string]bool, accepted bool)) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.l1VoteResultCB = fn
+}
+
+// SetL2VoteResultCallback sets callback for l2_vote_result (votes, accepted) so all nodes show the same L2 result.
+func (nm *NodesManager) SetL2VoteResultCallback(fn func(votes map[string]bool, accepted bool)) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.l2VoteResultCB = fn
+}
+
+// SetPendingBlockSyncCallback sets callback for syncing pending block from l1BlockCollected (so any node can run L2).
+func (nm *NodesManager) SetPendingBlockSyncCallback(fn func(pendingBlock []map[string]interface{})) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.pendingBlockSyncCB = fn
+}
+
+// SetMempoolAddCallback sets callback for mempool:add (add TX to local mempool when received from peer).
+func (nm *NodesManager) SetMempoolAddCallback(fn func(txMap map[string]interface{})) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.mempoolAddCB = fn
+}
+
+// SetFeeDistributionCallback sets callback for fee_distribution (per-node fee shares from confirmer).
+func (nm *NodesManager) SetFeeDistributionCallback(fn func(data map[string]interface{})) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.feeDistributionCB = fn
+}
+
+// SetBlockConfirmedCallback sets callback for block_confirmed (sync confirmed block from peer).
+func (nm *NodesManager) SetBlockConfirmedCallback(fn func(data map[string]interface{})) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.blockConfirmedCB = fn
+}
+
+// SetNodeLoadCallback sets callback for node_load (sync load from peer so committee size reflects network load).
+func (nm *NodesManager) SetNodeLoadCallback(fn func(nodeId string, currentTasks, maxCapacity int64)) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.nodeLoadCB = fn
 }
 
 // GetConnectedNodes returns all connected peer nodes
@@ -303,12 +445,18 @@ func (nm *NodesManager) tryConnect(address string) error {
 
 	log.Printf("[NODE] Connected to %s", address)
 
-	// Send node announcement
+	// Send node announcement (restUrl so peer can forward L1/L2 to us)
+	nm.mu.RLock()
+	restURL := nm.restBaseURL
+	nm.mu.RUnlock()
 	announcement := map[string]interface{}{
 		"nodeId":  nm.nodeID,
 		"address": nm.nodeAddress,
 		"host":    nm.nodeHost,
 		"port":    nm.nodePort,
+	}
+	if restURL != "" {
+		announcement["restUrl"] = restURL
 	}
 	conn.WriteJSON(map[string]interface{}{
 		"type": "node:announce",
@@ -425,7 +573,7 @@ func (nm *NodesManager) handlePeerConnection(conn *websocket.Conn, address strin
 		case "client:disconnected":
 			nm.handleClientDisconnected(data)
 		case "blockchain:event":
-			nm.handleBlockchainEvent(data)
+			nm.handleBlockchainEvent(msg)
 		case "sockets:request":
 			nm.handleSocketsRequest(conn)
 		case "sockets:response":
@@ -435,10 +583,14 @@ func (nm *NodesManager) handlePeerConnection(conn *websocket.Conn, address strin
 		case "sync:response":
 			nm.handleSyncResponse(data)
 		case "ping":
-			// Respond to ping
-			conn.WriteJSON(map[string]interface{}{
-				"type": "pong",
-			})
+			// Respond to ping (serialize write to avoid concurrent write panic)
+			if peer := nm.getPeerByAddress(address); peer != nil {
+				peer.mu.Lock()
+				_ = conn.WriteJSON(map[string]interface{}{"type": "pong"})
+				peer.mu.Unlock()
+			} else {
+				_ = conn.WriteJSON(map[string]interface{}{"type": "pong"})
+			}
 		case "pong":
 			// Pong received, already handled by SetPongHandler
 		}
@@ -467,6 +619,7 @@ func (nm *NodesManager) handleNodeAnnounce(data map[string]interface{}, conn *we
 	peerAddr, _ := data["address"].(string)
 	host, _ := data["host"].(string)
 	port, _ := data["port"].(float64)
+	restUrl, _ := data["restUrl"].(string)
 
 	if nodeID == nm.nodeID {
 		return
@@ -490,6 +643,9 @@ func (nm *NodesManager) handleNodeAnnounce(data map[string]interface{}, conn *we
 			existing.LastPong = time.Now()
 			existing.PingFailures = 0
 		}
+		if restUrl != "" {
+			existing.RestURL = restUrl
+		}
 		nm.mu.Unlock()
 		return
 	}
@@ -500,6 +656,7 @@ func (nm *NodesManager) handleNodeAnnounce(data map[string]interface{}, conn *we
 		Address:       peerAddr,
 		Host:          host,
 		Port:          int(port),
+		RestURL:       restUrl,
 		Conn:          conn,
 		LastPong:      time.Now(),
 		PingFailures:  0,
@@ -510,26 +667,31 @@ func (nm *NodesManager) handleNodeAnnounce(data map[string]interface{}, conn *we
 
 	log.Printf("[NODE] Peer node registered: %s... at %s", nodeID[:8], peerAddr)
 
-	// Send our own announcement back
-	conn.WriteJSON(map[string]interface{}{
+	// Send our own announcement back (include restUrl so peer can forward L1/L2 to us). Serialize writes to avoid concurrent write panic.
+	nm.mu.RLock()
+	myRestURL := nm.restBaseURL
+	nm.mu.RUnlock()
+	reply := map[string]interface{}{
+		"nodeId":  nm.nodeID,
+		"address": nm.nodeAddress,
+		"host":    nm.nodeHost,
+		"port":    nm.nodePort,
+	}
+	if myRestURL != "" {
+		reply["restUrl"] = myRestURL
+	}
+	peer.mu.Lock()
+	_ = conn.WriteJSON(map[string]interface{}{
 		"type": "node:announce",
-		"data": map[string]interface{}{
-			"nodeId":  nm.nodeID,
-			"address": nm.nodeAddress,
-			"host":    nm.nodeHost,
-			"port":    nm.nodePort,
-		},
+		"data": reply,
 	})
-
-	// Request socket list
-	conn.WriteJSON(map[string]interface{}{
+	_ = conn.WriteJSON(map[string]interface{}{
 		"type": "sockets:request",
 	})
-
-	// Send blockchain state sync request
-	conn.WriteJSON(map[string]interface{}{
+	_ = conn.WriteJSON(map[string]interface{}{
 		"type": "sync:request",
 	})
+	peer.mu.Unlock()
 }
 
 func (nm *NodesManager) handleClientConnected(data map[string]interface{}) {
@@ -581,10 +743,15 @@ func (nm *NodesManager) handleClientDisconnected(data map[string]interface{}) {
 	log.Printf("[WS] Client disconnected on %s...", nodeID[:8])
 }
 
-func (nm *NodesManager) handleBlockchainEvent(data map[string]interface{}) {
-	originNodeID, _ := data["originNodeId"].(string)
-	eventID, _ := data["eventId"].(string)
-	
+func (nm *NodesManager) handleBlockchainEvent(msg map[string]interface{}) {
+	// msg is the full envelope: type, eventType, data, timestamp, originNodeId, eventId
+	originNodeID, _ := msg["originNodeId"].(string)
+	eventID, _ := msg["eventId"].(string)
+	eventType, _ := msg["eventType"].(string)
+	if eventType == "" {
+		eventType, _ = msg["type"].(string)
+	}
+
 	if originNodeID == nm.nodeID {
 		return // Prevent loops
 	}
@@ -593,16 +760,15 @@ func (nm *NodesManager) handleBlockchainEvent(data map[string]interface{}) {
 	if eventID != "" {
 		nm.eventMutex.Lock()
 		if seen, exists := nm.seenEvents[eventID]; exists {
-			// Event seen within last 5 minutes, ignore
 			if time.Since(seen) < 5*time.Minute {
 				nm.eventMutex.Unlock()
-				log.Printf("[NODE] Duplicate event ignored: %s", eventID[:8])
+				if len(eventID) >= 8 {
+					log.Printf("[NODE] Duplicate event ignored: %s", eventID[:8])
+				}
 				return
 			}
 		}
 		nm.seenEvents[eventID] = time.Now()
-		
-		// Clean old events (older than 10 minutes)
 		for id, t := range nm.seenEvents {
 			if time.Since(t) > 10*time.Minute {
 				delete(nm.seenEvents, id)
@@ -611,43 +777,180 @@ func (nm *NodesManager) handleBlockchainEvent(data map[string]interface{}) {
 		nm.eventMutex.Unlock()
 	}
 
-	// Handle message routing events - notify WebSocket server
-	eventType, _ := data["eventType"].(string)
-	if eventType == "" {
-		eventType, _ = data["type"].(string) // Fallback
-	}
-	
 	if eventType == "message:route" {
-		// Get WebSocket server message handler if available
 		nm.mu.RLock()
 		handler := nm.wsMessageHandler
 		nm.mu.RUnlock()
-		
 		if handler != nil {
-			eventData, _ := data["data"].(map[string]interface{})
+			eventData, _ := msg["data"].(map[string]interface{})
 			handler(eventData)
 		}
-		// Don't check for duplicates on message routing - messages should be delivered
 		return
 	}
 
-	// Re-broadcast to other nodes
-	nm.BroadcastBlockchainEvent(eventType, data, originNodeID)
+	payload, _ := msg["data"].(map[string]interface{})
+	if payload == nil {
+		payload = make(map[string]interface{})
+	}
+
+	// L1/L2 vote callbacks (so handler can collect votes / respond with vote)
+	nm.voteCBMu.RLock()
+	switch eventType {
+	case "l1_proposal":
+		if nm.l1ProposalCB != nil {
+			blockId, _ := payload["blockId"].(string)
+			proposer, _ := payload["proposerNodeId"].(string)
+			txCount, _ := payload["txCount"].(float64)
+			nm.voteCBMu.RUnlock()
+			nm.l1ProposalCB(blockId, proposer, int(txCount))
+			nm.voteCBMu.RLock()
+		}
+	case "l1_vote":
+		if nm.l1VoteCB != nil {
+			blockId, _ := payload["blockId"].(string)
+			nodeId, _ := payload["nodeId"].(string)
+			yes, _ := payload["yes"].(bool)
+			nm.voteCBMu.RUnlock()
+			nm.l1VoteCB(blockId, nodeId, yes)
+			nm.voteCBMu.RLock()
+		}
+	case "l2_proposal":
+		if nm.l2ProposalCB != nil {
+			blockId, _ := payload["blockId"].(string)
+			proposer, _ := payload["proposerNodeId"].(string)
+			nm.voteCBMu.RUnlock()
+			nm.l2ProposalCB(blockId, proposer)
+			nm.voteCBMu.RLock()
+		}
+	case "l2_vote":
+		if nm.l2VoteCB != nil {
+			blockId, _ := payload["blockId"].(string)
+			nodeId, _ := payload["nodeId"].(string)
+			yes, _ := payload["yes"].(bool)
+			nm.voteCBMu.RUnlock()
+			nm.l2VoteCB(blockId, nodeId, yes)
+			nm.voteCBMu.RLock()
+		}
+	case "mempool:add":
+		if nm.mempoolAddCB != nil {
+			if txMap, ok := payload["tx"].(map[string]interface{}); ok {
+				nm.voteCBMu.RUnlock()
+				nm.mempoolAddCB(txMap)
+				nm.voteCBMu.RLock()
+			}
+		}
+	case "l1BlockCollected":
+		if nm.l1BlockCollectedCB != nil {
+			beneficiary, _ := payload["l1BeneficiaryNodeId"].(string)
+			nm.voteCBMu.RUnlock()
+			nm.l1BlockCollectedCB(beneficiary)
+			nm.voteCBMu.RLock()
+		}
+		if nm.pendingBlockSyncCB != nil {
+			var pendingMaps []map[string]interface{}
+			if arr, ok := payload["pendingBlock"].([]interface{}); ok {
+				for _, v := range arr {
+					if m, ok := v.(map[string]interface{}); ok {
+						pendingMaps = append(pendingMaps, m)
+					}
+				}
+			}
+			if len(pendingMaps) > 0 {
+				nm.voteCBMu.RUnlock()
+				nm.pendingBlockSyncCB(pendingMaps)
+				nm.voteCBMu.RLock()
+			}
+		}
+	case "l1_vote_result":
+		if nm.l1VoteResultCB != nil {
+			accepted, _ := payload["accepted"].(bool)
+			votesMap, _ := payload["votes"].(map[string]interface{})
+			votes := make(map[string]bool)
+			if votesMap != nil {
+				for k, v := range votesMap {
+					if b, ok := v.(bool); ok {
+						votes[k] = b
+					}
+				}
+			}
+			nm.voteCBMu.RUnlock()
+			nm.l1VoteResultCB(votes, accepted)
+			nm.voteCBMu.RLock()
+		}
+	case "l2_vote_result":
+		if nm.l2VoteResultCB != nil {
+			accepted, _ := payload["accepted"].(bool)
+			votesMap, _ := payload["votes"].(map[string]interface{})
+			votes := make(map[string]bool)
+			if votesMap != nil {
+				for k, v := range votesMap {
+					if b, ok := v.(bool); ok {
+						votes[k] = b
+					}
+				}
+			}
+			nm.voteCBMu.RUnlock()
+			nm.l2VoteResultCB(votes, accepted)
+			nm.voteCBMu.RLock()
+		}
+	case "fee_distribution":
+		if nm.feeDistributionCB != nil {
+			nm.voteCBMu.RUnlock()
+			nm.feeDistributionCB(payload)
+			nm.voteCBMu.RLock()
+		}
+	case "block_confirmed":
+		if nm.blockConfirmedCB != nil {
+			nm.voteCBMu.RUnlock()
+			nm.blockConfirmedCB(payload)
+			nm.voteCBMu.RLock()
+		}
+	case "node_load":
+		if nm.nodeLoadCB != nil {
+			nodeId, _ := payload["nodeId"].(string)
+			var cur, max int64
+			if v, ok := payload["currentTasks"].(float64); ok {
+				cur = int64(v)
+			}
+			if v, ok := payload["maxCapacity"].(float64); ok {
+				max = int64(v)
+			}
+			if nodeId != "" && max > 0 {
+				nm.voteCBMu.RUnlock()
+				nm.nodeLoadCB(nodeId, cur, max)
+				nm.voteCBMu.RLock()
+			}
+		}
+	}
+	nm.voteCBMu.RUnlock()
+
+	// In a full-mesh network every node is a direct peer of the sender,
+	// so the initial BroadcastBlockchainEvent already delivers the event to everyone.
+	// Re-broadcasting with a new eventID caused an exponential message storm
+	// (N nodes × N peers × N re-broadcasts) that saturated WebSocket connections
+	// and prevented votes from reaching the proposer in time.
+	// For non-full-mesh topologies in the future, implement gossip with preserved eventIDs.
 }
 
 func (nm *NodesManager) handleSocketsRequest(conn *websocket.Conn) {
 	if nm.getLocalSockets == nil {
 		return
 	}
-
 	localSockets := nm.getLocalSockets()
-	conn.WriteJSON(map[string]interface{}{
+	payload := map[string]interface{}{
 		"type": "sockets:response",
 		"data": map[string]interface{}{
 			"nodeId":  nm.nodeID,
 			"sockets": localSockets,
 		},
-	})
+	}
+	if peer := nm.getPeerByConn(conn); peer != nil {
+		peer.mu.Lock()
+		_ = conn.WriteJSON(payload)
+		peer.mu.Unlock()
+	} else {
+		_ = conn.WriteJSON(payload)
+	}
 }
 
 // HandleSocketsResponse handles socket list responses from peer nodes
@@ -680,10 +983,54 @@ func (nm *NodesManager) HandleSocketsResponse(data map[string]interface{}) {
 	nm.mu.Unlock()
 }
 
+// isConnDeadErr returns true for errors that mean the connection is gone (broken pipe, reset, etc.)
+func isConnDeadErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "use of closed network connection")
+}
+
+// removeDeadPeers removes peers that failed to receive the broadcast and schedules reconnect
+func (nm *NodesManager) removeDeadPeers(deadNodeIDs []string) {
+	if len(deadNodeIDs) == 0 {
+		return
+	}
+	nm.mu.Lock()
+	var addresses []string
+	for _, nodeID := range deadNodeIDs {
+		peer, ok := nm.connectedNodes[nodeID]
+		if !ok {
+			continue
+		}
+		addr := peer.Address
+		peer.mu.Lock()
+		if peer.Conn != nil {
+			_ = peer.Conn.Close()
+			peer.Conn = nil
+		}
+		peer.mu.Unlock()
+		delete(nm.connectedNodes, nodeID)
+		delete(nm.peerSocketsRegistry, nodeID)
+		if addr != "" {
+			addresses = append(addresses, addr)
+		}
+		if len(nodeID) >= 8 {
+			log.Printf("[NODE] Disconnected (write failed): %s", nodeID[:8])
+		}
+	}
+	nm.mu.Unlock()
+	for _, addr := range addresses {
+		nm.scheduleReconnect(addr)
+	}
+}
+
 // BroadcastBlockchainEvent broadcasts a blockchain event to all peer nodes
 func (nm *NodesManager) BroadcastBlockchainEvent(eventType string, data map[string]interface{}, originNodeID string) {
 	nm.mu.RLock()
-	defer nm.mu.RUnlock()
 
 	// Generate unique event ID for duplicate detection
 	eventID := fmt.Sprintf("%s-%d-%s", eventType, time.Now().UnixNano(), nm.nodeID)
@@ -702,6 +1049,7 @@ func (nm *NodesManager) BroadcastBlockchainEvent(eventType string, data map[stri
 	nm.seenEvents[eventID] = time.Now()
 	nm.eventMutex.Unlock()
 
+	var deadPeers []string
 	count := 0
 	for nodeID, peer := range nm.connectedNodes {
 		if originNodeID != "" && nodeID == originNodeID {
@@ -713,14 +1061,27 @@ func (nm *NodesManager) BroadcastBlockchainEvent(eventType string, data map[stri
 			if err := peer.Conn.WriteJSON(event); err == nil {
 				count++
 			} else {
-				log.Printf("[NODE] Error broadcasting to %s: %v", nodeID[:8], err)
+				if isConnDeadErr(err) {
+					deadPeers = append(deadPeers, nodeID)
+				} else {
+					log.Printf("[NODE] Error broadcasting to %s: %v", nodeID[:8], err)
+				}
 			}
 		}
 		peer.mu.Unlock()
 	}
+	nm.mu.RUnlock()
+
+	if len(deadPeers) > 0 {
+		nm.removeDeadPeers(deadPeers)
+	}
 
 	if count > 0 {
-		log.Printf("[NODE] Broadcasted %s (ID: %s) to %d node(s)", eventType, eventID[:8], count)
+		idShort := eventID
+		if len(eventID) > 8 {
+			idShort = eventID[:8]
+		}
+		log.Printf("[NODE] Broadcasted %s (ID: %s) to %d node(s)", eventType, idShort, count)
 	}
 }
 
@@ -843,16 +1204,21 @@ func (nm *NodesManager) loadPeers() []string {
 
 // handleSyncRequest handles blockchain state sync requests
 func (nm *NodesManager) handleSyncRequest(conn *websocket.Conn) {
-	// Send blockchain state (transactions, balances, etc.)
-	// This is a placeholder - in production, send actual blockchain state
-	conn.WriteJSON(map[string]interface{}{
+	payload := map[string]interface{}{
 		"type": "sync:response",
 		"data": map[string]interface{}{
 			"nodeId":     nm.nodeID,
 			"timestamp":  time.Now().Unix(),
 			"blockchain": "synced", // Placeholder
 		},
-	})
+	}
+	if peer := nm.getPeerByConn(conn); peer != nil {
+		peer.mu.Lock()
+		_ = conn.WriteJSON(payload)
+		peer.mu.Unlock()
+	} else {
+		_ = conn.WriteJSON(payload)
+	}
 	log.Printf("[NODE] Sent sync response to peer")
 }
 

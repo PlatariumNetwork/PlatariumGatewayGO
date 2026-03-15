@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Platarium - block</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, sans-serif; padding: 16px; }
+    .header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #30363d; }
+    .header h1 { margin: 0; font-size: 1.35rem; font-weight: 600; }
+    .btn { padding: 8px 14px; border-radius: 6px; border: none; font-size: 0.9rem; cursor: pointer; background: #238636; color: #fff; font-weight: 500; text-decoration: none; display: inline-block; }
+    .btn:hover { background: #2ea043; }
+    .btn.blue { background: #388bfd; }
+    .btn.blue:hover { background: #58a6ff; }
+    .section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .section h2 { font-size: 1rem; margin: 0 0 12px 0; color: #8b949e; font-weight: 600; }
+    .block-meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; font-size: 0.9rem; }
+    .block-meta .label { color: #8b949e; }
+    .block-meta .value { color: #e6edf3; font-weight: 500; }
+    .consensus-log { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px; font-size: 0.9rem; color: #3fb950; white-space: pre-wrap; }
+    .votes-section { margin-bottom: 14px; }
+    .votes-section h3 { font-size: 0.9rem; color: #8b949e; margin: 0 0 6px 0; font-weight: 600; }
+    .votes-list { font-size: 0.8rem; font-family: monospace; background: #0d1117; padding: 10px; border-radius: 6px; margin-top: 4px; }
+    .votes-list .yes { color: #3fb950; }
+    .votes-list .no { color: #f85149; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #30363d; }
+    th { color: #8b949e; font-weight: 600; }
+    .num { text-align: right; }
+    .hash { font-family: monospace; font-size: 0.8rem; color: #8b949e; }
+    a { color: #58a6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .empty { color: #8b949e; font-size: 0.9rem; }
+    .error { color: #f85149; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1 id="title">Block - loading…</h1>
+    <a href="nodes-viz.html" id="backLink" class="btn blue">← Back to nodes & analytics</a>
+  </div>
+
+  <p id="sourceNote" class="source-note" style="display:none; font-size:0.85rem; color:#8b949e; margin-bottom:12px; padding:10px; background:#161b22; border-radius:6px;"></p>
+
+  <div class="section">
+    <h2>Block</h2>
+    <div class="block-meta" id="blockMeta"></div>
+  </div>
+
+  <div class="section">
+    <h2>L1 / L2 miners</h2>
+    <div class="block-meta" id="minersMeta"></div>
+  </div>
+
+  <div class="section">
+    <h2>Consensus log</h2>
+    <div class="consensus-log" id="consensusLog">-</div>
+  </div>
+
+  <div class="section">
+    <h2>Voting participants (who took part in mining)</h2>
+    <p style="font-size:0.85rem; color:#8b949e; margin:0 0 10px 0;">List of nodes that voted for this block on L1 (block collect) and L2 (confirmation). Yes / No - whether they accepted the block.</p>
+    <div id="votesParticipants"></div>
+  </div>
+
+  <div class="section">
+    <h2>Transactions in block</h2>
+    <div id="txTableWrap"></div>
+  </div>
+
+  <script>
+    (function() {
+      var q = new URLSearchParams(window.location.search);
+      window.API = q.get('api') || window.location.origin;
+      if (!window.API || window.API === 'null' || window.API === 'file://' || window.API === '' || window.location.protocol === 'file:') window.API = 'http://localhost:2812';
+      window.BLOCK_NUM = q.get('block') || '';
+    })();
+    var API = window.API;
+    var BLOCK_NUM = window.BLOCK_NUM;
+
+    function el(id) { return document.getElementById(id); }
+    function shortAddr(addr) {
+      if (!addr) return '?';
+      if (addr.length <= 10) return addr;
+      return addr.slice(0, 6) + '…' + addr.slice(-4);
+    }
+
+    function load() {
+      if (!BLOCK_NUM) {
+        el('title').textContent = 'Block - specify ?block=0';
+        el('blockMeta').innerHTML = '<p class="empty">Add block parameter to URL (for example block.html?block=0).</p>';
+        return;
+      }
+      el('title').textContent = 'Block #' + BLOCK_NUM;
+
+      var q = new URLSearchParams(window.location.search);
+      var api = q.get('api') || '';
+      var apiQ = api ? '?api=' + encodeURIComponent(api) : '';
+      if (el('backLink')) el('backLink').href = 'nodes-viz.html' + apiQ;
+
+      fetch(API + '/api/block/' + encodeURIComponent(BLOCK_NUM))
+        .then(function(r) {
+          if (!r.ok) {
+            if (r.status === 404) {
+              var note = el('sourceNote');
+              note.style.display = 'block';
+              note.textContent = 'Blocks on this page come from the Gateway (Go) chain: they appear when this node or peers run L1→L2 (collect block from mempool and confirm by consensus). If blocks are formed externally (e.g. in Core) and are not pushed into Gateway, they will not show up here - this block is absent in Gateway.';
+              throw new Error('Block not found on this node');
+            }
+            throw new Error(r.status + ' ' + r.statusText);
+          }
+          return r.json();
+        })
+        .then(function(d) {
+          var block = d.block || {};
+          var txs = d.transactions || [];
+          var consensusLog = d.consensusLog || '-';
+
+          el('blockMeta').innerHTML =
+            '<div><span class="label">Block number</span><br><span class="value">' + block.blockNumber + '</span></div>' +
+            '<div><span class="label">Time (unix)</span><br><span class="value">' + (block.timestamp || '-') + '</span></div>' +
+            '<div><span class="label">TX in block</span><br><span class="value">' + (block.txCount || 0) + '</span></div>' +
+            '<div><span class="label">Fees (μPLP)</span><br><span class="value">' + (block.totalFees != null ? block.totalFees : '-') + '</span></div>' +
+            '<div><span class="label">L1 yes / no</span><br><span class="value">' + (block.l1Yes != null ? block.l1Yes : '-') + ' / ' + (block.l1No != null ? block.l1No : '-') + '</span></div>' +
+            '<div><span class="label">L2 yes / no</span><br><span class="value">' + (block.l2Yes != null ? block.l2Yes : '-') + ' / ' + (block.l2No != null ? block.l2No : '-') + '</span></div>' +
+            '<div><span class="label">L2 round time (ms)</span><br><span class="value">' + (block.durationMs != null ? block.durationMs : '-') + '</span></div>';
+
+          el('minersMeta').innerHTML =
+            '<div><span class="label">L1 miner (block collect)</span><br><span class="value">' + (block.l1BeneficiaryNodeId || '-') + '</span></div>' +
+            '<div><span class="label">L2 miner (confirmation)</span><br><span class="value">' + (block.l2ConfirmerNodeId || '-') + '</span></div>';
+
+          el('consensusLog').textContent = consensusLog;
+
+          var l1V = block.l1Votes || {};
+          var l2V = block.l2Votes || {};
+          var votesHtml = '';
+          function votesToLists(votes) {
+            var yes = [], no = [];
+            Object.keys(votes).forEach(function(id) {
+              if (votes[id]) yes.push(id); else no.push(id);
+            });
+            return { yes: yes, no: no };
+          }
+          if (Object.keys(l1V).length > 0) {
+            var l1 = votesToLists(l1V);
+            votesHtml += '<div class="votes-section"><h3>L1 (block collect)</h3>';
+            votesHtml += '<div class="votes-list"><span class="yes">Yes (' + l1.yes.length + '):</span> ' + (l1.yes.length ? l1.yes.join(', ') : '-') + '</div>';
+            votesHtml += '<div class="votes-list"><span class="no">No (' + l1.no.length + '):</span> ' + (l1.no.length ? l1.no.join(', ') : '-') + '</div></div>';
+          }
+          if (Object.keys(l2V).length > 0) {
+            var l2 = votesToLists(l2V);
+            votesHtml += '<div class="votes-section"><h3>L2 (confirmation)</h3>';
+            votesHtml += '<div class="votes-list"><span class="yes">Yes (' + l2.yes.length + '):</span> ' + (l2.yes.length ? l2.yes.join(', ') : '-') + '</div>';
+            votesHtml += '<div class="votes-list"><span class="no">No (' + l2.no.length + '):</span> ' + (l2.no.length ? l2.no.join(', ') : '-') + '</div></div>';
+          }
+          if (!votesHtml) votesHtml = '<p class="empty">No stored votes for this block (block was confirmed before participant log was saved).</p>';
+          el('votesParticipants').innerHTML = votesHtml;
+
+          var base = 'address.html';
+          if (!txs.length) {
+            el('txTableWrap').innerHTML = '<p class="empty">There are no transactions in this block.</p>';
+            return;
+          }
+          var rows = txs.map(function(tx) {
+            var from = tx.from || '-';
+            var to = tx.to || '-';
+            var amt = (tx.amount > 0) ? tx.amount : (tx.value != null ? tx.value : '0');
+            var fromShort = from !== '-' ? shortAddr(from) : '-';
+            var toShort = to !== '-' ? shortAddr(to) : '-';
+            var addrQ = api ? '&api=' + encodeURIComponent(api) : '';
+            var fromLink = from !== '-' ? '<a href="' + base + '?address=' + encodeURIComponent(from) + addrQ + '">' + fromShort + '</a>' : '-';
+            var toLink = to !== '-' ? '<a href="' + base + '?address=' + encodeURIComponent(to) + addrQ + '">' + toShort + '</a>' : '-';
+            return '<tr><td class="hash">' + (tx.hash || '').slice(0, 24) + '…</td><td>' + fromLink + '</td><td>' + toLink + '</td><td class="num">' + amt + '</td><td class="num">' + (tx.fee_uplp || tx.fee || '-') + '</td></tr>';
+          });
+          el('txTableWrap').innerHTML = '<table><thead><tr><th>Hash</th><th>From</th><th>To</th><th class="num">Amount (μPLP)</th><th class="num">Fee</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>';
+        })
+        .catch(function(e) {
+          el('blockMeta').innerHTML = '';
+          el('minersMeta').innerHTML = '';
+          el('consensusLog').textContent = '-';
+          var is404 = (e.message || '').indexOf('Block not found') >= 0;
+          el('txTableWrap').innerHTML = is404
+            ? '<p class="empty">This node does not have such a block. Blocks appear after L1→L2 in Gateway or synchronization with peers. If blocks are formed in Core and not pushed into Go, they will not be displayed here.</p>'
+            : '<p class="error">Error: ' + (e.message || '') + '</p>';
+        });
+    }
+
+    load();
+  </script>
+</body>
+</html>
