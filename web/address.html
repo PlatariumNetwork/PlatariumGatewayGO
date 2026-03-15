@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Platarium - Wallet</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, sans-serif; padding: 16px; }
+    .header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #30363d; }
+    .header h1 { margin: 0; font-size: 1.35rem; font-weight: 600; }
+    .btn { padding: 8px 14px; border-radius: 6px; border: none; font-size: 0.9rem; cursor: pointer; background: #238636; color: #fff; font-weight: 500; text-decoration: none; display: inline-block; }
+    .btn:hover { background: #2ea043; }
+    .btn.blue { background: #388bfd; }
+    .btn.blue:hover { background: #58a6ff; }
+    .section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .section h2 { font-size: 1rem; margin: 0 0 12px 0; color: #8b949e; font-weight: 600; }
+    .addr-line { font-family: monospace; font-size: 0.9rem; word-break: break-all; color: #e6edf3; }
+    .addr-short { font-family: monospace; color: #8b949e; }
+    .balance-value { font-size: 1.5rem; font-weight: 600; color: #3fb950; }
+    .tx-card { font-size: 0.85rem; padding: 10px 12px; margin-bottom: 8px; background: #0d1117; border-radius: 6px; border-left: 3px solid #388bfd; }
+    .tx-card.mempool { border-left-color: #d29922; background: #d2992218; }
+    .tx-card.l1 { border-left-color: #a371f7; background: #a371f718; }
+    .tx-card.l2 { border-left-color: #3fb950; background: #3fb95018; }
+    .tx-card .hash { color: #8b949e; font-size: 0.8rem; }
+    .tx-card .from-to { color: #e6edf3; margin-top: 4px; }
+    .badge { font-size: 0.7rem; font-weight: 600; padding: 2px 6px; border-radius: 4px; }
+    .tx-card .badge { margin-left: 6px; }
+    .badge-mempool, .tx-card .badge-mempool { background: #d2992233; color: #d29922; }
+    .badge-l1, .tx-card .badge-l1 { background: #a371f733; color: #a371f7; }
+    .badge-l2, .tx-card .badge-l2 { background: #3fb95033; color: #3fb950; }
+    .tx-card a { color: #58a6ff; text-decoration: none; }
+    .tx-card a:hover { text-decoration: underline; }
+    .empty { color: #8b949e; font-size: 0.9rem; }
+    .error { color: #f85149; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Wallet - balance & history</h1>
+    <a href="nodes-viz.html" id="backLink" class="btn blue">← Back to nodes & mempool</a>
+  </div>
+
+  <div class="section">
+    <h2>Address</h2>
+    <div class="addr-line" id="addrFull">-</div>
+    <div class="addr-short" id="addrShort" style="margin-top:4px;">-</div>
+  </div>
+
+  <div class="section">
+    <h2>Wallet balance</h2>
+    <div class="balance-value" id="balance">-</div>
+    <span style="color:#8b949e; font-size:0.9rem;">μPLP</span>
+  </div>
+
+  <div class="section" id="mempoolSection" style="display:none;">
+    <h2>Pending (mempool)</h2>
+    <p style="font-size:0.85rem; color:#8b949e; margin:0 0 8px 0;">Transactions for this address in mempool. Status: <span class="badge badge-mempool">mempool</span> - waiting to be collected into a block (L1).</p>
+    <div id="mempoolList"></div>
+  </div>
+
+  <div class="section" id="pendingSection" style="display:none;">
+    <h2>In block (L1)</h2>
+    <p style="font-size:0.85rem; color:#8b949e; margin:0 0 8px 0;">Transactions for this address are already in a collected block. Status: <span class="badge badge-l1">L1</span> - waiting for L2 confirmation.</p>
+    <div id="pendingList"></div>
+  </div>
+
+  <div class="section">
+    <h2>Transaction history (L2)</h2>
+    <p style="font-size:0.85rem; color:#8b949e; margin:0 0 8px 0;">Confirmed transactions. Status: <span class="badge badge-l2">L2</span> - in the chain.</p>
+    <div id="txList"></div>
+  </div>
+
+  <script>
+    (function() {
+      var q = new URLSearchParams(window.location.search);
+      window.API = q.get('api') || window.location.origin;
+      if (!window.API || window.API === 'null' || window.API === 'file://' || window.API === '' || window.location.protocol === 'file:') window.API = 'http://localhost:2812';
+      window.ADDRESS = q.get('address') || '';
+    })();
+    var API = window.API;
+    var ADDRESS = window.ADDRESS;
+
+    function el(id) { return document.getElementById(id); }
+    function shortAddr(addr) {
+      if (!addr) return '?';
+      if (addr.length <= 10) return addr;
+      return addr.slice(0, 4) + '…' + addr.slice(-4);
+    }
+
+    function txCard(tx, status, base, apiQ) {
+      var from = tx.from || '';
+      var to = tx.to || '';
+      var fromLink = from ? '<a href="' + base + '?address=' + encodeURIComponent(from) + apiQ + '">' + shortAddr(from) + '</a>' : '-';
+      var toLink = to ? '<a href="' + base + '?address=' + encodeURIComponent(to) + apiQ + '">' + shortAddr(to) + '</a>' : '-';
+      var amt = (tx.amount > 0) ? tx.amount : (tx.value != null ? tx.value : '0');
+      var statusClass = status === 'mempool' ? 'badge-mempool' : (status === 'L1' ? 'badge-l1' : 'badge-l2');
+      var cardClass = 'tx-card' + (status === 'mempool' ? ' mempool' : (status === 'L1' ? ' l1' : ' l2'));
+      return '<div class="' + cardClass + '"><div class="hash">' + (tx.hash || '').slice(0, 20) + '… <span class="badge ' + statusClass + '">' + status + '</span></div><div class="from-to">' + fromLink + ' → ' + toLink + ' <strong>' + amt + '</strong> μPLP</div></div>';
+    }
+
+    function load() {
+      if (!ADDRESS) {
+        el('addrFull').textContent = 'Specify an address in URL: address.html?address=Px…';
+        el('balance').textContent = '-';
+        el('txList').innerHTML = '<p class="empty">Add ?address= to the link or navigate from a TX card.</p>';
+        return;
+      }
+      el('addrFull').textContent = ADDRESS;
+      el('addrShort').textContent = 'Short: ' + shortAddr(ADDRESS);
+
+      fetch(API + '/pg-bal/' + encodeURIComponent(ADDRESS))
+        .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then(function(d) {
+          var bal = (d && d.balance !== undefined) ? d.balance : '0';
+          el('balance').textContent = bal;
+        })
+        .catch(function() { el('balance').textContent = '-'; el('balance').className = 'balance-value error'; });
+
+      var base = 'address.html';
+      var apiQ = window.location.search.indexOf('api=') >= 0 ? '&' + window.location.search.replace(/^\?/, '') : '';
+
+      fetch(API + '/api/mempool')
+        .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then(function(d) {
+          var all = d.mempool || [];
+          var forAddr = all.filter(function(tx) {
+            var from = (tx.from || '').toString();
+            var to = (tx.to || '').toString();
+            return from === ADDRESS || to === ADDRESS;
+          });
+          var section = el('mempoolSection');
+          var list = el('mempoolList');
+          if (!forAddr.length) {
+            section.style.display = 'none';
+            return;
+          }
+          section.style.display = 'block';
+          list.innerHTML = forAddr.map(function(tx) { return txCard(tx, 'mempool', base, apiQ); }).join('');
+        })
+        .catch(function() {
+          el('mempoolSection').style.display = 'none';
+        });
+
+      fetch(API + '/api/pending-block')
+        .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then(function(d) {
+          var all = d.pendingBlock || [];
+          var forAddr = all.filter(function(tx) {
+            var from = (tx.from || '').toString();
+            var to = (tx.to || '').toString();
+            return from === ADDRESS || to === ADDRESS;
+          });
+          var section = el('pendingSection');
+          var list = el('pendingList');
+          if (!forAddr.length) {
+            section.style.display = 'none';
+            return;
+          }
+          section.style.display = 'block';
+          list.innerHTML = forAddr.map(function(tx) { return txCard(tx, 'L1', base, apiQ); }).join('');
+        })
+        .catch(function() {
+          el('pendingSection').style.display = 'none';
+        });
+
+      fetch(API + '/pg-alltx/' + encodeURIComponent(ADDRESS))
+        .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then(function(d) {
+          var arr = Array.isArray(d) ? d : (d && d.transactions) ? d.transactions : [];
+          var list = el('txList');
+          if (!arr.length) {
+            list.innerHTML = '<p class="empty">No confirmed transactions for this address.</p>';
+            return;
+          }
+          list.innerHTML = arr.slice().reverse().map(function(tx) { return txCard(tx, 'L2', base, apiQ); }).join('');
+        })
+        .catch(function(e) {
+          el('txList').innerHTML = '<p class="error">Failed to load history: ' + (e.message || '') + '</p>';
+        });
+    }
+
+    var back = document.getElementById('backLink');
+    if (back && window.location.search) back.href = 'nodes-viz.html' + window.location.search;
+    load();
+  </script>
+</body>
+</html>

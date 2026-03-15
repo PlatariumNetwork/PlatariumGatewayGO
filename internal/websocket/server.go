@@ -27,6 +27,7 @@ type Server struct {
 	nodesManager *nodes.NodesManager
 	clients      map[string]*Client          // by client ID
 	clientsByAddr map[string]*Client         // by wallet address
+	offlineMessages map[string][]OfflineMessage // buffered messages for offline addresses
 	mu           sync.RWMutex
 	server       *http.Server
 	messageHandler func(map[string]interface{}) // Handler for incoming peer messages
@@ -42,14 +43,23 @@ type Client struct {
 	mu          sync.Mutex
 }
 
+// OfflineMessage represents a message stored while recipient is offline
+type OfflineMessage struct {
+	From      string
+	To        string
+	Text      string
+	Timestamp int64
+}
+
 // NewServer creates a new WebSocket server
 func NewServer(port int, bc *blockchain.Blockchain, nm *nodes.NodesManager) *Server {
 	s := &Server{
 		port:         port,
 		blockchain:   bc,
 		nodesManager: nm,
-		clients:      make(map[string]*Client),
-		clientsByAddr: make(map[string]*Client),
+		clients:        make(map[string]*Client),
+		clientsByAddr:  make(map[string]*Client),
+		offlineMessages: make(map[string][]OfflineMessage),
 	}
 
 	// Set local sockets getter
@@ -177,19 +187,17 @@ func (s *Server) handlePeerMessages(conn *websocket.Conn, clientID string) {
 }
 
 func (s *Server) handleClientMessages(client *Client) {
-	// Keep connection alive by reading messages
-	// Don't exit on first error - keep trying to read
+	// Keep connection alive by reading messages.
+	// ВАЖЛИВО: при помилці читання з'єднання вважаємо зламаним і
+	// завершуємо цикл, щоб уникнути panic "repeated read on failed websocket connection".
 	for {
 		var msg map[string]interface{}
 		if err := client.Conn.ReadJSON(&msg); err != nil {
-			// Log error but don't break immediately - might be a temporary issue
 			log.Printf("[SOCKET] Error reading from client %s: %v", client.ID, err)
-			// Check if it's a close error
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				break
-			}
-			// For other errors, continue trying
-			continue
+			// На будь-яку помилку закриваємо сокет і виходимо з циклу.
+			// Gorilla WebSocket не дозволяє безпечно продовжувати читання після фатальної помилки.
+			_ = client.Conn.Close()
+			break
 		}
 
 		msgType, _ := msg["type"].(string)
