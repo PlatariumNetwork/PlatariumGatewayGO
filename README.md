@@ -3,17 +3,17 @@
 Gateway for blockchain integration via REST API and WebSocket in the Platarium network.  
 Full implementation in Go with P2P synchronization support between nodes.
 
-## Архітектура: Go - посередник, підключення до Core
+## Architecture: Go as mediator, connection to Core
 
-**До Core підключається лише Gateway (Go).** Клієнти та інші ноди з Core напряму не спілкуються.
+**Only the Gateway (Go) talks to Core.** Clients and other nodes do not communicate with Core directly.
 
-- **Клієнти / мережа** → надсилають запити та транзакції на **Gateway (Go)**.
-- **Gateway (Go)** → єдиний компонент, який **підключається до Platarium Core** (Rust): викликає `platarium-cli` для перевірки підписів, генерації ключів тощо.
-- **Core (Rust)** - криптографія та протокол; не має власного сервера, його використовує лише Gateway.
+- **Clients / network** → send requests and transactions to **Gateway (Go)**.
+- **Gateway (Go)** → the only component that **connects to Platarium Core** (Rust): it calls `platarium-cli` for signature verification, key generation, etc.
+- **Core (Rust)** — cryptography and protocol; it has no server of its own and is used only by the Gateway.
 
-У testnet-режимі Gateway сам вирішує, коли викликати Core для валідації TX; клієнти просто відправляють TX на REST/WS Gateway.
+In testnet mode the Gateway decides when to call Core to validate TX; clients simply submit TX to the REST/WS Gateway.
 
-**Децентралізована мережа:** не важливо, на яку ноду прийшла транзакція - вона потрапляє в спільний Mempool і синхронізується між нодами. Ноди беруть TX з Mempool; протокол за репутацією (вага вибору) обирає L1 (збір блоку) та L2 (підтвердження).
+**Decentralized network:** it does not matter which node receives a transaction — it enters the shared Mempool and is synchronized across nodes. Nodes take TX from the Mempool; the reputation-based protocol (selection weight) chooses L1 (block collection) and L2 (confirmation).
 
 ## Features
 
