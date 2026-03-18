@@ -13,6 +13,8 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 		return
 	}
 
+	var announceAddr, announcePk string
+
 	s.mu.Lock()
 	// Remove old address mapping if exists
 	if client.Address != "" && client.Address != address {
@@ -24,11 +26,24 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 	s.clientsByAddr[address] = client
 	if pk, ok := data["e2eePublicKey"].(string); ok && pk != "" {
 		s.e2eePubKeys[address] = pk
+<<<<<<< HEAD
+=======
+		announceAddr, announcePk = address, pk
+>>>>>>> 7112f8d (release: version 1.0.5.5)
 	}
 	// Take buffered offline messages (if any) for this address
 	pending := s.offlineMessages[address]
 	delete(s.offlineMessages, address)
 	s.mu.Unlock()
+
+	now := time.Now().Unix()
+	filtered := pending[:0]
+	for _, m := range pending {
+		if offlineMessageAgeOK(m, now) {
+			filtered = append(filtered, m)
+		}
+	}
+	pending = filtered
 
 	log.Printf("[MESSAGE] Client %s registered address: %s", client.ID[:8], address)
 
@@ -61,6 +76,10 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 			}
 			client.mu.Unlock()
 		}
+	}
+
+	if announcePk != "" {
+		go s.broadcastE2eePubKeyAnnouncement(announceAddr, announcePk)
 	}
 }
 
@@ -98,20 +117,20 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 	s.mu.RUnlock()
 
 	if !found {
-		// Recipient is offline on this node: buffer message for later delivery
+		// Recipient is offline on this node: buffer message for later delivery (up to 24h, see server.go TTL)
 		log.Printf("[MESSAGE] Recipient %s offline, buffering message", to)
 		s.mu.Lock()
 		buf := s.offlineMessages[to]
 		now := time.Now().Unix()
 		buf = append(buf, OfflineMessage{
-			From:      from,
-			To:        to,
-			Text:      text,
-			Timestamp: now,
+			From:       from,
+			To:         to,
+			Text:       text,
+			Timestamp:  now,
+			BufferedAt: now,
 		})
-		// Optional: limit buffer size per recipient to avoid unbounded growth
-		if len(buf) > 100 {
-			buf = buf[len(buf)-100:]
+		if len(buf) > offlineMessageMaxPerRecipient {
+			buf = buf[len(buf)-offlineMessageMaxPerRecipient:]
 		}
 		s.offlineMessages[to] = buf
 		s.mu.Unlock()
@@ -153,9 +172,15 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 		s.mu.Lock()
 		delete(s.clientsByAddr, to)
 		buf := s.offlineMessages[to]
-		buf = append(buf, OfflineMessage{From: from, To: to, Text: text, Timestamp: now})
-		if len(buf) > 100 {
-			buf = buf[len(buf)-100:]
+		buf = append(buf, OfflineMessage{
+			From:       from,
+			To:         to,
+			Text:       text,
+			Timestamp:  now,
+			BufferedAt: time.Now().Unix(),
+		})
+		if len(buf) > offlineMessageMaxPerRecipient {
+			buf = buf[len(buf)-offlineMessageMaxPerRecipient:]
 		}
 		s.offlineMessages[to] = buf
 		s.mu.Unlock()
@@ -263,18 +288,49 @@ func (s *Server) HandleIncomingPeerMessage(data map[string]interface{}) {
 		if ts == 0 {
 			ts = time.Now().Unix()
 		}
+		queuedAt := time.Now().Unix()
 		buf := s.offlineMessages[to]
 		buf = append(buf, OfflineMessage{
-			From:      from,
-			To:        to,
-			Text:      text,
-			Timestamp: ts,
+			From:       from,
+			To:         to,
+			Text:       text,
+			Timestamp:  ts,
+			BufferedAt: queuedAt,
 		})
-		if len(buf) > 100 {
-			buf = buf[len(buf)-100:]
+		if len(buf) > offlineMessageMaxPerRecipient {
+			buf = buf[len(buf)-offlineMessageMaxPerRecipient:]
 		}
 		s.offlineMessages[to] = buf
 		s.mu.Unlock()
+	}
+}
+
+// broadcastE2eePubKeyAnnouncement notifies all connected messenger clients so senders can encrypt
+// without polling when a recipient registers their key on this gateway.
+func (s *Server) broadcastE2eePubKeyAnnouncement(addr, publicKey string) {
+	if publicKey == "" || addr == "" {
+		return
+	}
+	payload := map[string]interface{}{
+		"type": "e2eePubKey",
+		"data": map[string]interface{}{
+			"address":   addr,
+			"publicKey": publicKey,
+		},
+	}
+	s.mu.RLock()
+	snapshot := make([]*Client, 0, len(s.clients))
+	for _, c := range s.clients {
+		snapshot = append(snapshot, c)
+	}
+	s.mu.RUnlock()
+	for _, c := range snapshot {
+		if c == nil {
+			continue
+		}
+		c.mu.Lock()
+		_ = c.Conn.WriteJSON(payload)
+		c.mu.Unlock()
 	}
 }
 

@@ -47,10 +47,11 @@ type Client struct {
 
 // OfflineMessage represents a message stored while recipient is offline
 type OfflineMessage struct {
-	From      string
-	To        string
-	Text      string
-	Timestamp int64
+	From       string
+	To         string
+	Text       string
+	Timestamp  int64 // sender-side logical time
+	BufferedAt int64 // gateway wall time when queued; used for 24h retention
 }
 
 // NewServer creates a new WebSocket server
@@ -76,6 +77,8 @@ func NewServer(port int, bc *blockchain.Blockchain, nm *nodes.NodesManager) *Ser
 
 // Start starts the WebSocket server
 func (s *Server) Start() error {
+	go s.runOfflineMessageJanitor()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleWebSocket)
 
@@ -322,5 +325,50 @@ func (s *Server) GetConnectedSockets() []*nodes.SocketInfo {
 		})
 	}
 	return sockets
+}
+
+const (
+	offlineMessageTTLSeconds        = 86400 // 24h retention on gateway
+	offlineMessageMaxPerRecipient   = 500
+	offlineMessageJanitorInterval   = 30 * time.Minute
+)
+
+func (s *Server) runOfflineMessageJanitor() {
+	ticker := time.NewTicker(offlineMessageJanitorInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.pruneExpiredOfflineMessages()
+	}
+}
+
+func (s *Server) pruneExpiredOfflineMessages() {
+	now := time.Now().Unix()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for to, buf := range s.offlineMessages {
+		kept := buf[:0]
+		for _, m := range buf {
+			ba := m.BufferedAt
+			if ba == 0 {
+				ba = m.Timestamp
+			}
+			if now-ba <= offlineMessageTTLSeconds {
+				kept = append(kept, m)
+			}
+		}
+		if len(kept) == 0 {
+			delete(s.offlineMessages, to)
+		} else {
+			s.offlineMessages[to] = kept
+		}
+	}
+}
+
+func offlineMessageAgeOK(m OfflineMessage, now int64) bool {
+	ba := m.BufferedAt
+	if ba == 0 {
+		ba = m.Timestamp
+	}
+	return now-ba <= offlineMessageTTLSeconds
 }
 
