@@ -2,7 +2,6 @@ package core
 
 import (
 	"encoding/json"
-	"os/exec"
 	"strings"
 	"testing"
 )

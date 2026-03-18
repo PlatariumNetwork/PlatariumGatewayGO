@@ -351,7 +351,6 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) b
 		txHashes[tx.Hash] = true
 		bc.totalFeesCollected += fee
 	}
-
 	newMempool := make([]*Transaction, 0, len(bc.mempool))
 	for _, tx := range bc.mempool {
 		if !txHashes[tx.Hash] {

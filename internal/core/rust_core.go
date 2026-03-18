@@ -282,9 +282,7 @@ func (rc *RustCore) ValidateTransaction(txJSON string) (valid bool, err error) {
 		return false, fmt.Errorf("%s", out.Error)
 	}
 	return true, nil
-}
-
-// SignTransaction creates a full signed transaction via Core (mnemonic + alphanumeric). Returns the signed tx as JSON string (Core format).
+}// SignTransaction creates a full signed transaction via Core (mnemonic + alphanumeric). Returns the signed tx as JSON string (Core format).
 func (rc *RustCore) SignTransaction(from, to, asset string, amount, feeUplp, nonce uint64, reads, writes []string, mnemonic, alphanumeric string) (signedTxJSON string, err error) {
 	if reads == nil {
 		reads = []string{}

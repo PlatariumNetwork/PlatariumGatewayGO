@@ -121,6 +121,7 @@ func main() {
 	router.HandleFunc("/api/last-votes", handler.GetLastVotes).Methods("GET")
 	router.HandleFunc("/api/test-set-load", handler.TestSetLoad).Methods("POST")
 	router.HandleFunc("/api/generate-wallet", handler.GenerateWallet).Methods("GET")
+	router.HandleFunc("/api/restore-wallet", handler.RestoreWallet).Methods("POST")
 	router.HandleFunc("/api/faucet", handler.Faucet).Methods("POST")
 
 	// Serve index.html at root and /index.html (must be last to not interfere with other routes)
