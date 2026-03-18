@@ -28,6 +28,8 @@ type Server struct {
 	clients      map[string]*Client          // by client ID
 	clientsByAddr map[string]*Client         // by wallet address
 	offlineMessages map[string][]OfflineMessage // buffered messages for offline addresses
+	// Last known X25519 public keys (base64) for messenger E2EE; kept after disconnect until overwritten.
+	e2eePubKeys map[string]string
 	mu           sync.RWMutex
 	server       *http.Server
 	messageHandler func(map[string]interface{}) // Handler for incoming peer messages
@@ -60,6 +62,7 @@ func NewServer(port int, bc *blockchain.Blockchain, nm *nodes.NodesManager) *Ser
 		clients:        make(map[string]*Client),
 		clientsByAddr:  make(map[string]*Client),
 		offlineMessages: make(map[string][]OfflineMessage),
+		e2eePubKeys:    make(map[string]string),
 	}
 
 	// Set local sockets getter
@@ -218,6 +221,8 @@ func (s *Server) handleClientMessages(client *Client) {
 		case "message":
 			// Direct message between clients
 			s.handleDirectMessage(client, data)
+		case "e2eePubKeyRequest":
+			s.handleE2eePubKeyRequest(client, data)
 		}
 	}
 }

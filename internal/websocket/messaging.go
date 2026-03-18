@@ -22,6 +22,9 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 	// Update client address
 	client.Address = address
 	s.clientsByAddr[address] = client
+	if pk, ok := data["e2eePublicKey"].(string); ok && pk != "" {
+		s.e2eePubKeys[address] = pk
+	}
 	// Take buffered offline messages (if any) for this address
 	pending := s.offlineMessages[address]
 	delete(s.offlineMessages, address)
@@ -175,6 +178,29 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 			"to":        to,
 			"timestamp": now,
 		},
+	})
+}
+
+// handleE2eePubKeyRequest returns a peer's last registered X25519 public key (base64) for E2EE.
+func (s *Server) handleE2eePubKeyRequest(client *Client, data map[string]interface{}) {
+	ofAddress, _ := data["address"].(string)
+	requestID, _ := data["requestId"].(string)
+	if ofAddress == "" || requestID == "" {
+		return
+	}
+	s.mu.RLock()
+	pk := s.e2eePubKeys[ofAddress]
+	s.mu.RUnlock()
+	payload := map[string]interface{}{
+		"address":   ofAddress,
+		"requestId": requestID,
+	}
+	if pk != "" {
+		payload["publicKey"] = pk
+	}
+	_ = client.Conn.WriteJSON(map[string]interface{}{
+		"type": "e2eePubKey",
+		"data": payload,
 	})
 }
 
