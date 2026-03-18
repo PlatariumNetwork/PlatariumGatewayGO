@@ -23,6 +23,7 @@ type NodeInfo struct {
 	Address string `json:"address"`
 	Host    string `json:"host"`
 	Port    int    `json:"port"`
+	RestURL string `json:"restUrl,omitempty"`
 }
 
 // SocketInfo represents information about a connected client socket
@@ -120,6 +121,13 @@ func (nm *NodesManager) SetRestBaseURL(url string) {
 	nm.mu.Lock()
 	defer nm.mu.Unlock()
 	nm.restBaseURL = url
+}
+
+// GetRestBaseURL returns this node's REST base URL (e.g. http://host:1812), if configured.
+func (nm *NodesManager) GetRestBaseURL() string {
+	nm.mu.RLock()
+	defer nm.mu.RUnlock()
+	return nm.restBaseURL
 }
 
 // GetPeerRestURL returns the REST base URL for a peer by nodeID, or empty if unknown.
@@ -266,6 +274,7 @@ func (nm *NodesManager) GetConnectedNodes() []NodeInfo {
 			Address: peer.Address,
 			Host:    peer.Host,
 			Port:    peer.Port,
+			RestURL: peer.RestURL,
 		})
 	}
 	return nodes
