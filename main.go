@@ -76,7 +76,8 @@ func main() {
 
 	// Setup REST API
 	router := mux.NewRouter()
-	router.Use(corsMiddleware)
+	// CORS must wrap the whole router (not router.Use): gorilla/mux runs Use() middleware
+	// only when a route matches — OPTIONS preflight to POST-only routes would 404 without CORS.
 	router.Use(loggingMiddleware)
 
 	// Initialize handlers (testnet mode requires Core for TX validation)
@@ -142,7 +143,7 @@ func main() {
 	// Start REST API server
 	restServer := &http.Server{
 		Addr:    fmt.Sprintf("0.0.0.0:%d", *portREST), // Listen on all interfaces
-		Handler: router,
+		Handler: corsMiddleware(router),
 	}
 
 	go func() {
