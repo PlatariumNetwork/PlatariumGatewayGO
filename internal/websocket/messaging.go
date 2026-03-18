@@ -26,10 +26,7 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 	s.clientsByAddr[address] = client
 	if pk, ok := data["e2eePublicKey"].(string); ok && pk != "" {
 		s.e2eePubKeys[address] = pk
-<<<<<<< HEAD
-=======
 		announceAddr, announcePk = address, pk
->>>>>>> 7112f8d (release: version 1.0.5.5)
 	}
 	// Take buffered offline messages (if any) for this address
 	pending := s.offlineMessages[address]
