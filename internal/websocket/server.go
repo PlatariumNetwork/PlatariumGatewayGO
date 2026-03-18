@@ -143,8 +143,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		// Remove from clients map
 		if client, exists := s.clients[clientID]; exists {
 			delete(s.clients, clientID)
-			// Remove from address map if registered
-			if client.Address != "" {
+			// Remove from address map only if this client is still the one registered
+			// (same address may have reconnected as a new client)
+			if client.Address != "" && s.clientsByAddr[client.Address] == client {
 				delete(s.clientsByAddr, client.Address)
 			}
 		}

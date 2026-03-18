@@ -286,8 +286,11 @@
     }
     function get(path) {
       return fetch(API + path, { signal: timeoutSignal(FETCH_TIMEOUT_MS) }).then(function(r) {
-        if (!r.ok) return r.text().then(function(t) { throw new Error(r.status + ' ' + (t || r.statusText).slice(0, 80)); });
-        return r.json();
+        return r.text().then(function(t) {
+          if (!r.ok) throw new Error(r.status + ' ' + (t || r.statusText).slice(0, 80));
+          if (t.trim().toLowerCase().indexOf('<!doctype') === 0) throw new Error('Got HTML instead of JSON for ' + path + '. Check nginx proxy for ' + path);
+          try { return JSON.parse(t); } catch (e) { throw new Error('Invalid JSON for ' + path + ': ' + (e.message || '')); }
+        });
       });
     }
     function post(path, body) {
@@ -321,6 +324,11 @@
     function wsUrlForBrowser(apiBase, nodeAddress) {
       if (!nodeAddress || typeof nodeAddress !== 'string') return null;
       try {
+        var protocol = window.location.protocol;
+        var host = window.location.host;
+        if (protocol === 'https:') {
+          return 'wss://' + host + '/ws';
+        }
         var u = new URL(nodeAddress);
         var pageOrigin = window.location.origin;
         var pageUrl = pageOrigin.startsWith('http') ? new URL(pageOrigin) : null;

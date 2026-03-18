@@ -142,18 +142,29 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 	}
 
 	recipient.mu.Lock()
-	if err := recipient.Conn.WriteJSON(message); err != nil {
-		log.Printf("[MESSAGE] Error sending message to %s: %v", to, err)
-		recipient.mu.Unlock()
+	err := recipient.Conn.WriteJSON(message)
+	recipient.mu.Unlock()
+
+	if err != nil {
+		log.Printf("[MESSAGE] Error sending message to %s (connection dead): %v; buffering for later", to, err)
+		s.mu.Lock()
+		delete(s.clientsByAddr, to)
+		buf := s.offlineMessages[to]
+		buf = append(buf, OfflineMessage{From: from, To: to, Text: text, Timestamp: now})
+		if len(buf) > 100 {
+			buf = buf[len(buf)-100:]
+		}
+		s.offlineMessages[to] = buf
+		s.mu.Unlock()
 		sender.Conn.WriteJSON(map[string]interface{}{
-			"type": "messageError",
+			"type": "messageSent",
 			"data": map[string]interface{}{
-				"error": "Failed to deliver message",
+				"to":        to,
+				"timestamp": now,
 			},
 		})
 		return
 	}
-	recipient.mu.Unlock()
 
 	log.Printf("[MESSAGE] Message delivered from %s to %s", from, to)
 

@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -812,6 +813,47 @@ func (h *Handler) GenerateWallet(w http.ResponseWriter, r *http.Request) {
 		"alphanumeric": alphanumeric,
 		"publicKey":   publicKey,
 		"address":     publicKey,
+	})
+}
+
+// RestoreWallet derives wallet keys/address from mnemonic + alphanumeric (same as GenerateWallet would).
+func (h *Handler) RestoreWallet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	if h.rustCore == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "Core (platarium-cli) not available"})
+		return
+	}
+	var body struct {
+		Mnemonic     string `json:"mnemonic"`
+		Alphanumeric string `json:"alphanumeric"`
+		SeedIndex    uint32 `json:"seedIndex"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	body.Mnemonic = strings.TrimSpace(body.Mnemonic)
+	body.Alphanumeric = strings.TrimSpace(body.Alphanumeric)
+	if body.Mnemonic == "" || body.Alphanumeric == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "body must include mnemonic and alphanumeric"})
+		return
+	}
+	keys, err := h.rustCore.GenerateKeys(body.Mnemonic, body.Alphanumeric, body.SeedIndex)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	publicKey := keys["publicKey"]
+	if publicKey == "" {
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "Core did not return publicKey"})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"publicKey": publicKey,
+		"address":   publicKey,
 	})
 }
 
