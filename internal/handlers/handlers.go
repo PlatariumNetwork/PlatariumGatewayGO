@@ -664,8 +664,9 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) NetworkStatus(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
-		"nodeId":        h.nodesManager.GetNodeID(),
-		"nodeAddress":   h.nodesManager.GetNodeAddress(),
+		"nodeId":         h.nodesManager.GetNodeID(),
+		"nodeAddress":    h.nodesManager.GetNodeAddress(),
+		"restUrl":        h.nodesManager.GetRestBaseURL(),
 		"connectedNodes": h.nodesManager.GetConnectedNodes(),
 	}
 	jsonResponse(w, http.StatusOK, response)
