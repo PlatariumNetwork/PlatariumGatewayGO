@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -660,6 +661,26 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 		"connectedPeers": len(h.nodesManager.GetConnectedNodes()),
 	}
 	jsonResponse(w, http.StatusOK, response)
+}
+
+// WebRtcTurnIce returns STUN/TURN list for WebRTC calls (same JSON shape as Platarium messenger Next.js /api/turn-ice).
+// Configure on the node: WEBRTC_ICE_SERVERS_JSON='[{"urls":"stun:..."},...]'
+func (h *Handler) WebRtcTurnIce(w http.ResponseWriter, r *http.Request) {
+	raw := strings.TrimSpace(os.Getenv("WEBRTC_ICE_SERVERS_JSON"))
+	if raw == "" {
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"iceServers": []interface{}{}})
+		return
+	}
+	var ice []interface{}
+	if err := json.Unmarshal([]byte(raw), &ice); err != nil {
+		log.Printf("[turn-ice] invalid WEBRTC_ICE_SERVERS_JSON: %v", err)
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"iceServers": []interface{}{}})
+		return
+	}
+	if ice == nil {
+		ice = []interface{}{}
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"iceServers": ice})
 }
 
 func (h *Handler) NetworkStatus(w http.ResponseWriter, r *http.Request) {

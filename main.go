@@ -124,6 +124,7 @@ func main() {
 	router.HandleFunc("/api/generate-wallet", handler.GenerateWallet).Methods("GET")
 	router.HandleFunc("/api/restore-wallet", handler.RestoreWallet).Methods("POST")
 	router.HandleFunc("/api/faucet", handler.Faucet).Methods("POST")
+	router.HandleFunc("/api/turn-ice", handler.WebRtcTurnIce).Methods("GET")
 
 	// Serve index.html at root and /index.html (must be last to not interfere with other routes)
 	router.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {
