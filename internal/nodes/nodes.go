@@ -91,6 +91,32 @@ type PeerConnection struct {
 	mu            sync.Mutex
 }
 
+// normalizePeerWebSocketDialURL makes peer addresses safe for url.Parse and gorilla/websocket.Dial.
+// Peer config often lists bare "host:port"; without a scheme, url.Parse fails (colon in host:port).
+func normalizePeerWebSocketDialURL(address string) (string, error) {
+	a := strings.TrimSpace(address)
+	if a == "" {
+		return "", fmt.Errorf("empty peer address")
+	}
+	lower := strings.ToLower(a)
+	if strings.HasPrefix(lower, "ws://") || strings.HasPrefix(lower, "wss://") {
+		return a, nil
+	}
+	if strings.HasPrefix(lower, "http://") {
+		return "ws://" + a[len("http://"):], nil
+	}
+	if strings.HasPrefix(lower, "https://") {
+		return "wss://" + a[len("https://"):], nil
+	}
+	return "ws://" + a, nil
+}
+
+func peerWebSocketDialURLsEqual(a, b string) bool {
+	na, e1 := normalizePeerWebSocketDialURL(a)
+	nb, e2 := normalizePeerWebSocketDialURL(b)
+	return e1 == nil && e2 == nil && na == nb
+}
+
 // NewNodesManager creates a new nodes manager
 func NewNodesManager(port int, host string) *NodesManager {
 	nodeID := uuid.New().String()
@@ -400,7 +426,7 @@ func (nm *NodesManager) ConnectToPeers() {
 	peers := nm.loadPeers()
 	log.Printf("[NODE] Connecting to %d peer(s)...", len(peers))
 	for _, peerAddr := range peers {
-		if peerAddr != nm.nodeAddress {
+		if !peerWebSocketDialURLsEqual(peerAddr, nm.nodeAddress) {
 			go nm.ConnectToNodeWithRetry(peerAddr)
 		}
 	}
@@ -420,11 +446,19 @@ func (nm *NodesManager) ConnectToNodeWithRetry(address string) {
 
 // tryConnect attempts to connect to a peer node
 func (nm *NodesManager) tryConnect(address string) error {
-	if address == nm.nodeAddress {
+	wsDialURL, err := normalizePeerWebSocketDialURL(address)
+	if err != nil {
+		return err
+	}
+	selfWS, err := normalizePeerWebSocketDialURL(nm.nodeAddress)
+	if err != nil {
+		return err
+	}
+	if wsDialURL == selfWS {
 		return fmt.Errorf("cannot connect to self")
 	}
 
-	parsedURL, err := url.Parse(address)
+	parsedURL, err := url.Parse(wsDialURL)
 	if err != nil {
 		return err
 	}
@@ -1203,7 +1237,7 @@ func (nm *NodesManager) loadPeers() []string {
 	// Filter out self
 	filtered := []string{}
 	for _, peer := range peers {
-		if peer != nm.nodeAddress {
+		if !peerWebSocketDialURLsEqual(peer, nm.nodeAddress) {
 			filtered = append(filtered, peer)
 		}
 	}
