@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Зупинити всі процеси gateway, що слухають на портах Platarium (2812, 2813, 2822, ...).
-# Використовуйте, якщо killall platarium-gateway не спрацьовує (на macOS процес може зватися platarium).
+# Stop all gateway processes listening on Platarium ports (2812, 2813, 2822, ...).
+# Use when killall platarium-gateway fails (on macOS the process may be named platarium).
 #
 # Usage: cd PlatariumGatewayGO && ./scripts/stop_all_nodes.sh
-# З іншим діапазоном: NODES=100 ./scripts/stop_all_nodes.sh
+# Custom range: NODES=100 ./scripts/stop_all_nodes.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATEWAY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -14,14 +14,14 @@ BASE_WS="${BASE_WS:-2813}"
 cd "$GATEWAY_DIR"
 echo "Stopping Platarium gateway processes (ports $BASE_REST..$((BASE_REST+10*(NODES-1))), $BASE_WS..$((BASE_WS+10*(NODES-1))))..."
 
-# 1) Спробувати killall за іменем (різні варіанти)
+# 1) Try killall by process name (various names)
 for name in platarium-gateway platarium; do
   if killall "$name" 2>/dev/null; then
     echo "  killall $name: sent SIGTERM"
   fi
 done
 
-# 2) Знайти та вбити всі PIDs, що слухають на наших портах
+# 2) Find and kill all PIDs listening on our ports
 killed=0
 for (( i=0; i<NODES; i++ )); do
   rest=$((BASE_REST+10*i))
@@ -38,9 +38,9 @@ for (( i=0; i<NODES; i++ )); do
   done
 done
 
-# Дозволити процесам завершитися
+# Allow processes to shut down gracefully
 sleep 1
-# Якщо ще залишилися - SIGKILL за портами
+# If any remain - SIGKILL by port
 for (( i=0; i<NODES; i++ )); do
   rest=$((BASE_REST+10*i))
   ws=$((BASE_WS+10*i))

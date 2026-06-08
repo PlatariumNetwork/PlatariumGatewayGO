@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -51,9 +52,9 @@ type NodesManager struct {
 	eventMutex          sync.RWMutex
 
 	// L1/L2 vote callbacks (called before re-broadcast so handler can collect votes / respond with vote)
-	l1ProposalCB       func(blockId, proposerNodeId string, txCount int)
+	l1ProposalCB       func(blockId, proposerNodeId string, txCount int, txHashes []string)
 	l1VoteCB           func(blockId, nodeId string, yes bool)
-	l2ProposalCB       func(blockId, proposerNodeId string)
+	l2ProposalCB       func(blockId, proposerNodeId string, txHashes []string)
 	l2VoteCB           func(blockId, nodeId string, yes bool)
 	l1BlockCollectedCB  func(l1BeneficiaryNodeId string) // who gets L1 reward when L2 confirms
 	pendingBlockSyncCB  func(pendingBlock []map[string]interface{}) // sync pending block so any node can run L2
@@ -63,7 +64,13 @@ type NodesManager struct {
 	feeDistributionCB   func(data map[string]interface{})
 	blockConfirmedCB    func(data map[string]interface{})
 	nodeLoadCB          func(nodeId string, currentTasks, maxCapacity int64) // sync load from peer for committee size
+	chainHeadCB         func() int64
+	syncRespondCB       func(fromBlock int64) map[string]interface{}
+	syncApplyCB         func(data map[string]interface{})
 	voteCBMu            sync.RWMutex
+
+	knownPeerAddrs map[string]struct{}
+	peerTLSConfig  *tls.Config
 
 	mu sync.RWMutex
 }
@@ -129,6 +136,7 @@ func NewNodesManager(port int, host string) *NodesManager {
 		peerSocketsRegistry: make(map[string]map[string]*SocketInfo),
 		reconnectTimers:     make(map[string]*time.Timer),
 		seenEvents:          make(map[string]time.Time),
+		knownPeerAddrs:      make(map[string]struct{}),
 	}
 }
 
@@ -140,6 +148,20 @@ func (nm *NodesManager) GetNodeID() string {
 // GetNodeAddress returns the node's WebSocket address
 func (nm *NodesManager) GetNodeAddress() string {
 	return nm.nodeAddress
+}
+
+// SetPeerTLSConfig sets TLS for outbound wss:// peer connections.
+func (nm *NodesManager) SetPeerTLSConfig(cfg *tls.Config) {
+	nm.mu.Lock()
+	nm.peerTLSConfig = cfg
+	nm.mu.Unlock()
+}
+
+// SetNodeAddress sets the public WebSocket dial URL announced to peers (ws:// or wss://).
+func (nm *NodesManager) SetNodeAddress(address string) {
+	nm.mu.Lock()
+	nm.nodeAddress = address
+	nm.mu.Unlock()
 }
 
 // SetRestBaseURL sets the REST API base URL (e.g. http://localhost:2812) sent in node:announce so peers can forward L1/L2 to this node.
@@ -204,8 +226,8 @@ func (nm *NodesManager) SetWSMessageHandler(handler func(map[string]interface{})
 	nm.wsMessageHandler = handler
 }
 
-// SetL1ProposalCallback sets callback for l1_proposal (blockId, proposerNodeId, txCount). Called when we receive l1_proposal from a peer.
-func (nm *NodesManager) SetL1ProposalCallback(fn func(blockId, proposerNodeId string, txCount int)) {
+// SetL1ProposalCallback sets callback for l1_proposal. Called when we receive l1_proposal from a peer.
+func (nm *NodesManager) SetL1ProposalCallback(fn func(blockId, proposerNodeId string, txCount int, txHashes []string)) {
 	nm.voteCBMu.Lock()
 	defer nm.voteCBMu.Unlock()
 	nm.l1ProposalCB = fn
@@ -218,8 +240,8 @@ func (nm *NodesManager) SetL1VoteCallback(fn func(blockId, nodeId string, yes bo
 	nm.l1VoteCB = fn
 }
 
-// SetL2ProposalCallback sets callback for l2_proposal (blockId, proposerNodeId). Called when we receive l2_proposal from a peer.
-func (nm *NodesManager) SetL2ProposalCallback(fn func(blockId, proposerNodeId string)) {
+// SetL2ProposalCallback sets callback for l2_proposal. Called when we receive l2_proposal from a peer.
+func (nm *NodesManager) SetL2ProposalCallback(fn func(blockId, proposerNodeId string, txHashes []string)) {
 	nm.voteCBMu.Lock()
 	defer nm.voteCBMu.Unlock()
 	nm.l2ProposalCB = fn
@@ -286,6 +308,27 @@ func (nm *NodesManager) SetNodeLoadCallback(fn func(nodeId string, currentTasks,
 	nm.voteCBMu.Lock()
 	defer nm.voteCBMu.Unlock()
 	nm.nodeLoadCB = fn
+}
+
+// SetChainHeadCallback returns the local confirmed head block number (-1 if empty).
+func (nm *NodesManager) SetChainHeadCallback(fn func() int64) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.chainHeadCB = fn
+}
+
+// SetSyncRespondCallback builds a sync:response payload for blocks from fromBlockNumber.
+func (nm *NodesManager) SetSyncRespondCallback(fn func(fromBlock int64) map[string]interface{}) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.syncRespondCB = fn
+}
+
+// SetSyncApplyCallback applies a sync:response payload from a peer.
+func (nm *NodesManager) SetSyncApplyCallback(fn func(data map[string]interface{})) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.syncApplyCB = fn
 }
 
 // GetConnectedNodes returns all connected peer nodes
@@ -426,6 +469,7 @@ func (nm *NodesManager) ConnectToPeers() {
 	peers := nm.loadPeers()
 	log.Printf("[NODE] Connecting to %d peer(s)...", len(peers))
 	for _, peerAddr := range peers {
+		nm.recordKnownPeer(peerAddr)
 		if !peerWebSocketDialURLsEqual(peerAddr, nm.nodeAddress) {
 			go nm.ConnectToNodeWithRetry(peerAddr)
 		}
@@ -480,6 +524,11 @@ func (nm *NodesManager) tryConnect(address string) error {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 5 * time.Second,
 	}
+	nm.mu.RLock()
+	if nm.peerTLSConfig != nil {
+		dialer.TLSClientConfig = nm.peerTLSConfig.Clone()
+	}
+	nm.mu.RUnlock()
 
 	conn, _, err := dialer.Dial(addressWithPeer, nil)
 	if err != nil {
@@ -505,6 +554,7 @@ func (nm *NodesManager) tryConnect(address string) error {
 		"type": "node:announce",
 		"data": announcement,
 	})
+	nm.recordKnownPeer(address)
 
 	// Handle the connection
 	go nm.handlePeerConnection(conn, address)
@@ -622,9 +672,11 @@ func (nm *NodesManager) handlePeerConnection(conn *websocket.Conn, address strin
 		case "sockets:response":
 			nm.HandleSocketsResponse(data)
 		case "sync:request":
-			nm.handleSyncRequest(conn)
+			nm.handleSyncRequest(conn, data)
 		case "sync:response":
 			nm.handleSyncResponse(data)
+		case "peer:gossip":
+			nm.handlePeerGossip(data)
 		case "ping":
 			// Respond to ping (serialize write to avoid concurrent write panic)
 			if peer := nm.getPeerByAddress(address); peer != nil {
@@ -731,10 +783,24 @@ func (nm *NodesManager) handleNodeAnnounce(data map[string]interface{}, conn *we
 	_ = conn.WriteJSON(map[string]interface{}{
 		"type": "sockets:request",
 	})
+	fromBlock := int64(0)
+	nm.voteCBMu.RLock()
+	if nm.chainHeadCB != nil {
+		head := nm.chainHeadCB()
+		fromBlock = head + 1
+		if fromBlock < 0 {
+			fromBlock = 0
+		}
+	}
+	nm.voteCBMu.RUnlock()
 	_ = conn.WriteJSON(map[string]interface{}{
 		"type": "sync:request",
+		"data": map[string]interface{}{"fromBlockNumber": fromBlock},
 	})
 	peer.mu.Unlock()
+
+	nm.sendPeerGossip(peer)
+	go nm.broadcastPeerGossip()
 }
 
 func (nm *NodesManager) handleClientConnected(data map[string]interface{}) {
@@ -844,8 +910,9 @@ func (nm *NodesManager) handleBlockchainEvent(msg map[string]interface{}) {
 			blockId, _ := payload["blockId"].(string)
 			proposer, _ := payload["proposerNodeId"].(string)
 			txCount, _ := payload["txCount"].(float64)
+			txHashes := parsePayloadStringSlice(payload, "txHashes")
 			nm.voteCBMu.RUnlock()
-			nm.l1ProposalCB(blockId, proposer, int(txCount))
+			nm.l1ProposalCB(blockId, proposer, int(txCount), txHashes)
 			nm.voteCBMu.RLock()
 		}
 	case "l1_vote":
@@ -861,8 +928,9 @@ func (nm *NodesManager) handleBlockchainEvent(msg map[string]interface{}) {
 		if nm.l2ProposalCB != nil {
 			blockId, _ := payload["blockId"].(string)
 			proposer, _ := payload["proposerNodeId"].(string)
+			txHashes := parsePayloadStringSlice(payload, "txHashes")
 			nm.voteCBMu.RUnlock()
-			nm.l2ProposalCB(blockId, proposer)
+			nm.l2ProposalCB(blockId, proposer, txHashes)
 			nm.voteCBMu.RLock()
 		}
 	case "l2_vote":
@@ -1245,31 +1313,65 @@ func (nm *NodesManager) loadPeers() []string {
 	return filtered
 }
 
-// handleSyncRequest handles blockchain state sync requests
-func (nm *NodesManager) handleSyncRequest(conn *websocket.Conn) {
-	payload := map[string]interface{}{
-		"type": "sync:response",
-		"data": map[string]interface{}{
+// handleSyncRequest handles blockchain state sync requests (real chain export).
+func (nm *NodesManager) handleSyncRequest(conn *websocket.Conn, request map[string]interface{}) {
+	fromBlock := int64(0)
+	if v, ok := request["fromBlockNumber"].(float64); ok {
+		fromBlock = int64(v)
+	}
+	var payload map[string]interface{}
+	nm.voteCBMu.RLock()
+	if nm.syncRespondCB != nil {
+		payload = nm.syncRespondCB(fromBlock)
+	} else {
+		payload = map[string]interface{}{
 			"nodeId":     nm.nodeID,
 			"timestamp":  time.Now().Unix(),
-			"blockchain": "synced", // Placeholder
-		},
+			"headBlockNumber": int64(-1),
+			"blocks":     []interface{}{},
+		}
 	}
+	nm.voteCBMu.RUnlock()
 	if peer := nm.getPeerByConn(conn); peer != nil {
 		peer.mu.Lock()
-		_ = conn.WriteJSON(payload)
+		_ = conn.WriteJSON(map[string]interface{}{
+			"type": "sync:response",
+			"data": payload,
+		})
 		peer.mu.Unlock()
 	} else {
-		_ = conn.WriteJSON(payload)
+		_ = conn.WriteJSON(map[string]interface{}{
+			"type": "sync:response",
+			"data": payload,
+		})
 	}
-	log.Printf("[NODE] Sent sync response to peer")
+	log.Printf("[NODE] Sent sync response fromBlock=%d blocks=%v", fromBlock, blockCount(payload))
 }
 
-// handleSyncResponse handles blockchain state sync responses
+func blockCount(payload map[string]interface{}) int {
+	if blocks, ok := payload["blocks"].([]map[string]interface{}); ok {
+		return len(blocks)
+	}
+	if blocks, ok := payload["blocks"].([]interface{}); ok {
+		return len(blocks)
+	}
+	return 0
+}
+
+// handleSyncResponse handles blockchain state sync responses (apply missing blocks).
 func (nm *NodesManager) handleSyncResponse(data map[string]interface{}) {
 	nodeID, _ := data["nodeId"].(string)
-	log.Printf("[NODE] Received sync response from %s...", nodeID[:8])
-	// In production, merge blockchain state here
+	short := nodeID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	nm.voteCBMu.RLock()
+	apply := nm.syncApplyCB
+	nm.voteCBMu.RUnlock()
+	if apply != nil {
+		apply(data)
+	}
+	log.Printf("[NODE] Received sync response from %s... (blocks=%d)", short, blockCount(data))
 }
 
 // GetMetrics returns monitoring metrics
@@ -1315,5 +1417,19 @@ func (nm *NodesManager) GetMetrics() map[string]interface{} {
 		"peers":            peers,
 		"seenEvents":       seenEventsCount,
 	}
+}
+
+func parsePayloadStringSlice(payload map[string]interface{}, key string) []string {
+	arr, ok := payload[key].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, v := range arr {
+		if s, ok := v.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 

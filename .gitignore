@@ -34,3 +34,8 @@ log/
 .DS_Store
 Thumbs.db
 
+# PM2 / gateway deploy secrets (see .env.gateway.example + ecosystem.gateway.config.js)
+.env.gateway
+ecosystem.gateway.config.json
+ecosystem.gateway.config.cjs
+

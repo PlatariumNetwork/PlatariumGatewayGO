@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "blockCounter": 1,
+  "totalFeesCollected": 0,
+  "blocks": [
+    {
+      "blockNumber": 0,
+      "timestamp": 1780951040,
+      "txHashes": [
+        "20260608213720-hash"
+      ],
+      "txCount": 1,
+      "totalFees": 0,
+      "blockHash": "2b942fb52bfd50f0789965d4fea6c5d74cd3645addaf25df9d3cfb63690d2df4",
+      "merkleRoot": "0",
+      "stateRoot": "92f941ef2d9ed33d62de4cc4b1010987e659ed9a0b03c4d84e7725f10bcbfaa6",
+      "previousHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "producerNodeId": "813a1cd3-e10e-487e-b576-aa1cab5ee132",
+      "l1Yes": 3,
+      "l2Yes": 3,
+      "durationMs": 15,
+      "l1BeneficiaryNodeId": "813a1cd3-e10e-487e-b576-aa1cab5ee132",
+      "l2ConfirmerNodeId": "813a1cd3-e10e-487e-b576-aa1cab5ee132",
+      "l1Votes": {
+        "0b9ab9b9-80c9-4de5-82c9-b8776a30b4c8": true,
+        "3ed70354-19f9-47b2-b4c6-ac53ad490b74": true,
+        "813a1cd3-e10e-487e-b576-aa1cab5ee132": true
+      },
+      "l2Votes": {
+        "0b9ab9b9-80c9-4de5-82c9-b8776a30b4c8": true,
+        "3ed70354-19f9-47b2-b4c6-ac53ad490b74": true,
+        "813a1cd3-e10e-487e-b576-aa1cab5ee132": true
+      }
+    }
+  ],
+  "transactions": [
+    {
+      "hash": "20260608213720-hash",
+      "from": "faucet",
+      "to": "PxAlice",
+      "value": "1000000",
+      "fee": "0",
+      "nonce": 0,
+      "timestamp": 1780951040,
+      "type": "faucet",
+      "assetType": "native",
+      "amount": 1000000
+    }
+  ]
+}

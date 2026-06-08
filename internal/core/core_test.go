@@ -86,7 +86,7 @@ func TestVerifySignatureWithRealCore(t *testing.T) {
 	}
 
 	// Invalid signature must not verify
-	verifiedBad, _ := rc.VerifySignature(msg, signatureHex+"00", pubKeyHex)
+	verifiedBad, _ := rc.VerifySignature(msg, strings.Repeat("ab", 64), pubKeyHex)
 	if verifiedBad {
 		t.Fatal("invalid signature should not verify")
 	}

@@ -17,9 +17,15 @@ const (
 	WeightStake        = 200
 )
 
+const (
+	NodeStatusActive    = "active"
+	NodeStatusSuspended = "suspended"
+)
+
 // NodeScores holds per-node scores for reputation (Core-compatible).
 type NodeScores struct {
 	NodeID          string `json:"nodeId"`
+	Status          string `json:"status"` // "active" or "suspended"
 	UptimeScore     int64  `json:"uptimeScore"`     // 0..=ScoreScale
 	LatencyScore    int64  `json:"latencyScore"`    // 0..=ScoreScale (1.0 = best)
 	MissedVotes     int64  `json:"missedVotes"`
@@ -67,6 +73,16 @@ func (n *NodeScores) SelectionWeight() int64 {
 	return n.ReputationScore * loadPenalty / ScoreScale
 }
 
+// IsSuspended reports whether the node is suspended from validator selection.
+func (n *NodeScores) IsSuspended() bool {
+	return n != nil && n.Status == NodeStatusSuspended
+}
+
+// IsEligibleForCommittee reports whether the node may participate in L1/L2 rounds.
+func (n *NodeScores) IsEligibleForCommittee() bool {
+	return n != nil && n.Status != NodeStatusSuspended
+}
+
 // Registry stores node scores and computes ratings.
 type Registry struct {
 	mu    sync.RWMutex
@@ -90,6 +106,7 @@ func (r *Registry) EnsureNode(nodeID string, stake, maxCapacity int64) *NodeScor
 	}
 	n := &NodeScores{
 		NodeID:       nodeID,
+		Status:       NodeStatusActive,
 		UptimeScore:  ScoreScale,
 		LatencyScore: ScoreScale,
 		Stake:        stake,
@@ -167,8 +184,8 @@ func (r *Registry) ApplyUptimePenalty(nodeID string, factor float64) {
 	n.ComputeReputation(maxStake)
 }
 
-// SetLoad sets current_tasks and max_capacity, then LoadScore = current_tasks×ScoreScale/max_capacity (Core: вплив навантаження на вагу вибору).
-// SelectionWeight = reputation×(1−load); висока навантаженість знижує ймовірність вибору як пропонера/конфірмера.
+// SetLoad sets current_tasks and max_capacity, then LoadScore = current_tasks×ScoreScale/max_capacity (Core: load affects selection weight).
+// SelectionWeight = reputation×(1−load); high load lowers probability of being chosen as proposer/confirmer.
 func (r *Registry) SetLoad(nodeID string, currentTasks, maxCapacity int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -239,7 +256,7 @@ func (r *Registry) SelectionWeightFor(nodeID string) int64 {
 	return w
 }
 
-// SelectionPercentFromLoad returns the percentage of validators to select (Core: чим вище навантаження, тим менше валідаторів).
+// SelectionPercentFromLoad returns the percentage of validators to select (Core: higher load → fewer validators).
 // loadPct 0→50%; 1–19→30%; 20–29→25%; 30–59→20%; 60–84→15%; else 10%. Fallback when Core unavailable.
 func SelectionPercentFromLoad(loadPct int) int {
 	if loadPct == 0 {
@@ -263,15 +280,15 @@ func SelectionPercentFromLoad(loadPct int) int {
 // SelectCommittee returns up to `count` node IDs from candidates, weighted by SelectionWeight (without replacement, as in Core).
 // Used to form the voting committee: when network is loaded, fewer nodes participate so rounds finish faster.
 func (r *Registry) SelectCommittee(candidateNodeIDs []string, count int) []string {
-	if count <= 0 || len(candidateNodeIDs) == 0 {
+	eligible := r.filterEligibleCandidates(candidateNodeIDs)
+	if count <= 0 || len(eligible) == 0 {
 		return nil
 	}
-	if count >= len(candidateNodeIDs) {
-		return append([]string(nil), candidateNodeIDs...)
+	if count >= len(eligible) {
+		return append([]string(nil), eligible...)
 	}
 	// Weighted selection without replacement: pick one, remove from pool, repeat.
-	remaining := make([]string, len(candidateNodeIDs))
-	copy(remaining, candidateNodeIDs)
+	remaining := append([]string(nil), eligible...)
 	result := make([]string, 0, count)
 	for len(result) < count && len(remaining) > 0 {
 		picked := r.SelectByWeight(remaining)
@@ -291,6 +308,17 @@ func (r *Registry) SelectCommittee(candidateNodeIDs []string, count int) []strin
 	return result
 }
 
+func (r *Registry) filterEligibleCandidates(candidateNodeIDs []string) []string {
+	out := make([]string, 0, len(candidateNodeIDs))
+	for _, id := range candidateNodeIDs {
+		if n := r.Get(id); n != nil && !n.IsEligibleForCommittee() {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
 // SelectByWeight picks one node from candidates with probability proportional to reputation/weight (protocol selection for L1/L2).
 func (r *Registry) SelectByWeight(candidateNodeIDs []string) string {
 	if len(candidateNodeIDs) == 0 {
@@ -300,15 +328,28 @@ func (r *Registry) SelectByWeight(candidateNodeIDs []string) string {
 		return candidateNodeIDs[0]
 	}
 	var total int64
-	weights := make([]int64, len(candidateNodeIDs))
-	for i, id := range candidateNodeIDs {
+	eligible := make([]string, 0, len(candidateNodeIDs))
+	weights := make([]int64, 0, len(candidateNodeIDs))
+	for _, id := range candidateNodeIDs {
+		if n := r.Get(id); n != nil && !n.IsEligibleForCommittee() {
+			continue
+		}
 		w := r.SelectionWeightFor(id)
 		if w <= 0 {
 			w = 1
 		}
-		weights[i] = w
+		eligible = append(eligible, id)
+		weights = append(weights, w)
 		total += w
 	}
+	if len(eligible) == 0 {
+		return ""
+	}
+	if len(eligible) == 1 {
+		return eligible[0]
+	}
+	candidateNodeIDs = eligible
+	weights = weights[:len(eligible)]
 	if total <= 0 {
 		return candidateNodeIDs[rand.Intn(len(candidateNodeIDs))]
 	}

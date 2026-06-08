@@ -2,9 +2,12 @@ package blockchain
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
+
+	"platarium-gateway-go/internal/core"
 )
 
 // Transaction represents a blockchain transaction.
@@ -21,8 +24,10 @@ type Transaction struct {
 	AssetType       string   `json:"assetType"`
 	ContractAddress string   `json:"contractAddress,omitempty"`
 	// Core format (for real validation and signed demo TX)
-	SigMain   string   `json:"sig_main,omitempty"`
-	SigDerived string  `json:"sig_derived,omitempty"`
+	SigMain    string   `json:"sig_main,omitempty"`
+	SigDerived string   `json:"sig_derived,omitempty"`
+	PubMain    string   `json:"pub_main,omitempty"`
+	PubDerived string   `json:"pub_derived,omitempty"`
 	Asset     string   `json:"asset,omitempty"`      // "PLP" or "Token:XXX"
 	AmountUplp uint64  `json:"amount,omitempty"`     // amount in minimal units
 	FeeUplp   uint64  `json:"fee_uplp,omitempty"`   // fee in μPLP
@@ -37,6 +42,11 @@ type BlockRecord struct {
 	TxHashes              []string       `json:"txHashes"`
 	TxCount               int            `json:"txCount"`
 	TotalFees             int64          `json:"totalFees"`
+	BlockHash             string         `json:"blockHash,omitempty"`
+	MerkleRoot            string         `json:"merkleRoot,omitempty"`
+	StateRoot             string         `json:"stateRoot,omitempty"`
+	PreviousHash          string         `json:"previousHash,omitempty"`
+	ProducerNodeID        string         `json:"producerNodeId,omitempty"`
 	L1Yes                 int            `json:"l1Yes,omitempty"`
 	L1No                  int            `json:"l1No,omitempty"`
 	L2Yes                 int            `json:"l2Yes,omitempty"`
@@ -44,22 +54,23 @@ type BlockRecord struct {
 	DurationMs            int            `json:"durationMs,omitempty"`
 	L1BeneficiaryNodeId   string         `json:"l1BeneficiaryNodeId,omitempty"`
 	L2ConfirmerNodeId     string         `json:"l2ConfirmerNodeId,omitempty"`
-	L1Votes               map[string]bool `json:"l1Votes,omitempty"` // nodeId -> voted yes (лог консенсусу L1)
-	L2Votes               map[string]bool `json:"l2Votes,omitempty"` // nodeId -> voted yes (лог консенсусу L2)
+	L1Votes               map[string]bool `json:"l1Votes,omitempty"` // nodeId -> voted yes (L1 consensus log)
+	L2Votes               map[string]bool `json:"l2Votes,omitempty"` // nodeId -> voted yes (L2 consensus log)
 }
 
 // Blockchain represents the blockchain interface
 type Blockchain struct {
 	mu                  sync.RWMutex
+	ledger              *core.LedgerService
 	transactions        map[string]*Transaction
 	mempool             []*Transaction
-	pendingBlock        []*Transaction // L1 зібрав → чекає підтвердження L2
-	balances            map[string]string
+	pendingBlock        []*Transaction // L1 collected → awaiting L2 confirmation
 	addressTxs          map[string][]*Transaction
 	lastTx              *Transaction
 	blockCounter        int64
 	blockHistory        []BlockRecord
-	totalFeesCollected  int64 // сума комісій з усіх підтверджених TX
+	totalFeesCollected  int64 // total fees from all confirmed TX
+	chainFile           string
 }
 
 // NewBlockchain creates a new blockchain instance
@@ -68,10 +79,23 @@ func NewBlockchain() *Blockchain {
 		transactions: make(map[string]*Transaction),
 		mempool:      make([]*Transaction, 0),
 		pendingBlock: make([]*Transaction, 0),
-		balances:     make(map[string]string),
 		addressTxs:   make(map[string][]*Transaction),
 		blockHistory: make([]BlockRecord, 0),
 	}
+}
+
+// SetLedger attaches the Core ledger service (authoritative balances).
+func (bc *Blockchain) SetLedger(ledger *core.LedgerService) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	bc.ledger = ledger
+}
+
+// Ledger returns the attached Core ledger service.
+func (bc *Blockchain) Ledger() *core.LedgerService {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.ledger
 }
 
 // Init initializes the blockchain
@@ -81,16 +105,30 @@ func (bc *Blockchain) Init() error {
 	return nil
 }
 
-// GetBalance returns the balance for an address
-func (bc *Blockchain) GetBalance(address string) string {
+// GetBalance returns PLP balance from Core state (confirmed only).
+func (bc *Blockchain) GetBalance(address string) (string, error) {
 	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-	
-	balance, exists := bc.balances[address]
-	if !exists {
-		return "0"
+	ledger := bc.ledger
+	bc.mu.RUnlock()
+	if ledger == nil {
+		return "", fmt.Errorf("core ledger unavailable")
 	}
-	return balance
+	q, err := ledger.Query(address)
+	if err != nil {
+		return "", err
+	}
+	return q.Balance, nil
+}
+
+// GetAccountQuery returns full Core account state for an address.
+func (bc *Blockchain) GetAccountQuery(address string) (*core.AccountQuery, error) {
+	bc.mu.RLock()
+	ledger := bc.ledger
+	bc.mu.RUnlock()
+	if ledger == nil {
+		return nil, fmt.Errorf("core ledger unavailable")
+	}
+	return ledger.Query(address)
 }
 
 // GetTransaction returns a transaction by hash
@@ -169,7 +207,103 @@ func (bc *Blockchain) GetMempool() []*Transaction {
 	out := make([]*Transaction, len(bc.mempool))
 	copy(out, bc.mempool)
 	return out
-}// L1CollectBlock moves all mempool TX into pending block (L1 зібрав блок, чекає L2)
+}
+
+// RemoveFromMempool removes transactions by hash (after L1 collect sync from peer).
+func (bc *Blockchain) RemoveFromMempool(hashes []string) {
+	if len(hashes) == 0 {
+		return
+	}
+	remove := make(map[string]bool, len(hashes))
+	for _, h := range hashes {
+		remove[h] = true
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	next := make([]*Transaction, 0, len(bc.mempool))
+	for _, tx := range bc.mempool {
+		if tx == nil || !remove[tx.Hash] {
+			next = append(next, tx)
+		}
+	}
+	bc.mempool = next
+}
+
+// SyncPendingBlock sets the pending block and removes those txs from mempool (multi-node L1 sync).
+func (bc *Blockchain) SyncPendingBlock(txs []*Transaction) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	bc.pendingBlock = make([]*Transaction, 0, len(txs))
+	hashes := make(map[string]bool, len(txs))
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		bc.pendingBlock = append(bc.pendingBlock, tx)
+		hashes[tx.Hash] = true
+	}
+	if len(hashes) == 0 {
+		return
+	}
+	nextMempool := make([]*Transaction, 0, len(bc.mempool))
+	for _, tx := range bc.mempool {
+		if tx == nil || !hashes[tx.Hash] {
+			nextMempool = append(nextMempool, tx)
+		}
+	}
+	bc.mempool = nextMempool
+}
+
+// GetMempoolTxsByHashes returns mempool transactions matching hashes in order; false if any hash missing.
+func (bc *Blockchain) GetMempoolTxsByHashes(hashes []string) ([]*Transaction, bool) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	byHash := make(map[string]*Transaction, len(bc.mempool))
+	for _, tx := range bc.mempool {
+		if tx != nil && tx.Hash != "" {
+			byHash[tx.Hash] = tx
+		}
+	}
+	out := make([]*Transaction, 0, len(hashes))
+	for _, hash := range hashes {
+		tx, ok := byHash[hash]
+		if !ok {
+			return nil, false
+		}
+		out = append(out, tx)
+	}
+	return out, true
+}
+
+// PendingBlockMatchesHashes reports whether pending block has exactly the given hashes.
+func (bc *Blockchain) PendingBlockMatchesHashes(hashes []string) bool {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	if len(hashes) != len(bc.pendingBlock) {
+		return false
+	}
+	remaining := make(map[string]int, len(hashes))
+	for _, h := range hashes {
+		remaining[h]++
+	}
+	for _, tx := range bc.pendingBlock {
+		if tx == nil {
+			return false
+		}
+		remaining[tx.Hash]--
+		if remaining[tx.Hash] < 0 {
+			return false
+		}
+	}
+	for _, count := range remaining {
+		if count != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// L1CollectBlock moves all mempool TX into pending block (L1 collected, awaiting L2)
 func (bc *Blockchain) L1CollectBlock() (moved []*Transaction) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -226,8 +360,51 @@ func parseFee(fee string) int64 {
 	return n
 }
 
-// L2ConfirmBlock moves pending block into chain (L2 підтвердив блок), знімає комісію
-func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord) {
+// applyConfirmedTransactions applies each transaction through Core ledger.
+func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) error {
+	bc.mu.RLock()
+	ledger := bc.ledger
+	bc.mu.RUnlock()
+	if ledger == nil {
+		return fmt.Errorf("core ledger unavailable")
+	}
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		if tx.From == FaucetAddress {
+			amt := parseAmount(tx)
+			uplp := tx.FeeUplp
+			if uplp == 0 {
+				uplp = 10_000
+			}
+			if err := ledger.Credit(tx.To, amt, uplp); err != nil {
+				return fmt.Errorf("faucet credit %s: %w", tx.Hash, err)
+			}
+			continue
+		}
+		coreJSON, ok := ToCoreJSON(tx)
+		if !ok {
+			return fmt.Errorf("transaction %s is not Core-compatible", tx.Hash)
+		}
+		if _, err := ledger.ApplyTx(coreJSON); err != nil {
+			return fmt.Errorf("apply tx %s: %w", tx.Hash, err)
+		}
+	}
+	return nil
+}
+
+// L2ConfirmBlock moves pending block into chain (L2 confirmed), applying state via Core.
+func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord, err error) {
+	bc.mu.Lock()
+	pendingCopy := make([]*Transaction, len(bc.pendingBlock))
+	copy(pendingCopy, bc.pendingBlock)
+	bc.mu.Unlock()
+
+	if err := bc.applyConfirmedTransactions(pendingCopy); err != nil {
+		return nil, BlockRecord{}, err
+	}
+
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 	block = BlockRecord{
@@ -246,11 +423,6 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord)
 		}
 		block.TotalFees += fee
 		bc.totalFeesCollected += fee
-		amt := parseAmount(tx)
-		if amt == 0 {
-			amt = uint64(parseFee(tx.Value))
-		}
-		bc.applyTransferLocked(tx.From, tx.To, amt, uint64(fee))
 		bc.transactions[tx.Hash] = tx
 		bc.lastTx = tx
 		bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
@@ -271,11 +443,23 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord)
 		}
 	}
 	bc.blockHistory = append(bc.blockHistory, block)
-	return moved, block
+	if err := bc.persistChain(); err != nil {
+		return moved, block, err
+	}
+	return moved, block, nil
 }
 
 // ConfirmMempoolToChain moves all mempool transactions into the chain (legacy: one step)
-func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block BlockRecord) {
+func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block BlockRecord, err error) {
+	bc.mu.Lock()
+	mempoolCopy := make([]*Transaction, len(bc.mempool))
+	copy(mempoolCopy, bc.mempool)
+	bc.mu.Unlock()
+
+	if err := bc.applyConfirmedTransactions(mempoolCopy); err != nil {
+		return nil, BlockRecord{}, err
+	}
+
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 	block = BlockRecord{
@@ -311,20 +495,29 @@ func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block Block
 		}
 	}
 	bc.blockHistory = append(bc.blockHistory, block)
-	return moved, block
+	if err := bc.persistChain(); err != nil {
+		return moved, block, err
+	}
+	return moved, block, nil
 }
 
 // AddConfirmedBlock adds a block received from a peer. Returns false if the block is already known.
-// Updates blockCounter, removes synced TX from mempool/pendingBlock.
-func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) bool {
+func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (bool, error) {
 	bc.mu.Lock()
-	defer bc.mu.Unlock()
-
 	for _, b := range bc.blockHistory {
 		if b.BlockNumber == block.BlockNumber {
-			return false
+			bc.mu.Unlock()
+			return false, nil
 		}
 	}
+	bc.mu.Unlock()
+
+	if err := bc.applyConfirmedTransactions(txs); err != nil {
+		return false, err
+	}
+
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
 
 	if block.BlockNumber >= 0 && block.BlockNumber+1 > bc.blockCounter {
 		bc.blockCounter = block.BlockNumber + 1
@@ -335,15 +528,10 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) b
 		if tx == nil {
 			continue
 		}
-		amt := parseAmount(tx)
-		if amt == 0 {
-			amt = uint64(parseFee(tx.Value))
-		}
 		fee := parseFee(tx.Fee)
 		if fee == 0 && tx.FeeUplp > 0 {
 			fee = int64(tx.FeeUplp)
 		}
-		bc.applyTransferLockedFromSync(tx.From, tx.To, amt, uint64(fee))
 		bc.transactions[tx.Hash] = tx
 		bc.lastTx = tx
 		bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
@@ -367,7 +555,10 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) b
 	bc.pendingBlock = newPending
 
 	bc.blockHistory = append(bc.blockHistory, block)
-	return true
+	if err := bc.persistChain(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // GetAllTransactions returns all transactions in chain (order: oldest first by timestamp)
@@ -444,76 +635,48 @@ func parseAmount(tx *Transaction) uint64 {
 	return 0
 }
 
-// CreditBalance adds amount to address balance (faucet / testnet). Caller must not hold bc.mu.
-func (bc *Blockchain) CreditBalance(address string, amount uint64) {
-	bc.mu.Lock()
-	defer bc.mu.Unlock()
-	bc.creditBalanceLocked(address, amount)
-}
-
-func (bc *Blockchain) creditBalanceLocked(address string, amount uint64) {
-	current := uint64(0)
-	if s, ok := bc.balances[address]; ok && s != "" {
-		current, _ = strconv.ParseUint(s, 10, 64)
-	}
-	bc.balances[address] = strconv.FormatUint(current+amount, 10)
-}// FaucetAddress is the sender address for faucet (kran) transactions. No deduction, only credit to To.
+// FaucetAddress is the sender address for faucet transactions.
 const FaucetAddress = "faucet"
 
-// applyTransferLocked applies a confirmed TX: deduct amount+fee from From, add amount to To. Caller must hold bc.mu.
-// For FaucetAddress: тільки зарахування на To (без списання).
-// If sender has insufficient balance, returns without changing state (used for local L2 confirm).
-func (bc *Blockchain) applyTransferLocked(from, to string, amount, fee uint64) {
-	if from == FaucetAddress {
-		currentTo := uint64(0)
-		if s, ok := bc.balances[to]; ok && s != "" {
-			currentTo, _ = strconv.ParseUint(s, 10, 64)
-		}
-		bc.balances[to] = strconv.FormatUint(currentTo+amount, 10)
-		return
+const genesisPreviousHash = "0000000000000000000000000000000000000000000000000000000000000000"
+
+// GetPreviousBlockHash returns the hash of the last confirmed block, or genesis hash.
+func (bc *Blockchain) GetPreviousBlockHash() string {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	if len(bc.blockHistory) == 0 {
+		return genesisPreviousHash
 	}
-	currentFrom := uint64(0)
-	if s, ok := bc.balances[from]; ok && s != "" {
-		currentFrom, _ = strconv.ParseUint(s, 10, 64)
+	last := bc.blockHistory[len(bc.blockHistory)-1]
+	if last.BlockHash != "" {
+		return last.BlockHash
 	}
-	if currentFrom < amount+fee {
-		return
-	}
-	bc.balances[from] = strconv.FormatUint(currentFrom-amount-fee, 10)
-	currentTo := uint64(0)
-	if s, ok := bc.balances[to]; ok && s != "" {
-		currentTo, _ = strconv.ParseUint(s, 10, 64)
-	}
-	bc.balances[to] = strconv.FormatUint(currentTo+amount, 10)
+	return genesisPreviousHash
 }
 
-// applyTransferLockedFromSync applies a TX from a block received from a peer. Block was already
-// validated by the network, so we always credit To and debit From so local state matches the chain.
-// If From has insufficient balance on this node (e.g. missed earlier blocks), we still credit To
-// and set From to 0 so balances stay consistent with confirmed history.
-func (bc *Blockchain) applyTransferLockedFromSync(from, to string, amount, fee uint64) {
-	if from == FaucetAddress {
-		currentTo := uint64(0)
-		if s, ok := bc.balances[to]; ok && s != "" {
-			currentTo, _ = strconv.ParseUint(s, 10, 64)
+// NextBlockNumber returns the block number for the next confirmed block.
+func (bc *Blockchain) NextBlockNumber() int64 {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.blockCounter
+}
+
+// ApplyBlockHeader sets Core-assembled header fields on the last block in history.
+func (bc *Blockchain) ApplyBlockHeader(blockNumber int64, header core.BlockHeader, producerNodeID string) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	for i := range bc.blockHistory {
+		if bc.blockHistory[i].BlockNumber == blockNumber {
+			bc.blockHistory[i].BlockHash = header.BlockHash
+			bc.blockHistory[i].MerkleRoot = header.MerkleRoot
+			bc.blockHistory[i].StateRoot = header.StateRoot
+			bc.blockHistory[i].PreviousHash = header.PreviousHash
+			if producerNodeID != "" {
+				bc.blockHistory[i].ProducerNodeID = producerNodeID
+			}
+			return
 		}
-		bc.balances[to] = strconv.FormatUint(currentTo+amount, 10)
-		return
 	}
-	currentFrom := uint64(0)
-	if s, ok := bc.balances[from]; ok && s != "" {
-		currentFrom, _ = strconv.ParseUint(s, 10, 64)
-	}
-	deduct := amount + fee
-	if currentFrom < deduct {
-		deduct = currentFrom
-	}
-	bc.balances[from] = strconv.FormatUint(currentFrom-deduct, 10)
-	currentTo := uint64(0)
-	if s, ok := bc.balances[to]; ok && s != "" {
-		currentTo, _ = strconv.ParseUint(s, 10, 64)
-	}
-	bc.balances[to] = strconv.FormatUint(currentTo+amount, 10)
 }
 
 // GetBlockHistory returns block records for analytics (with L1/L2 votes when available).

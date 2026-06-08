@@ -25,6 +25,8 @@ type Server struct {
 	port         int
 	blockchain   *blockchain.Blockchain
 	nodesManager *nodes.NodesManager
+	tlsCertFile  string
+	tlsKeyFile   string
 	clients      map[string]*Client          // by client ID
 	clientsByAddr map[string]*Client         // by wallet address
 	offlineMessages map[string][]OfflineMessage // buffered messages for offline addresses
@@ -75,6 +77,12 @@ func NewServer(port int, bc *blockchain.Blockchain, nm *nodes.NodesManager) *Ser
 	return s
 }
 
+// SetTLS enables HTTPS/WSS for the WebSocket server when cert and key paths are set.
+func (s *Server) SetTLS(certFile, keyFile string) {
+	s.tlsCertFile = certFile
+	s.tlsKeyFile = keyFile
+}
+
 // Start starts the WebSocket server
 func (s *Server) Start() error {
 	go s.runOfflineMessageJanitor()
@@ -88,6 +96,9 @@ func (s *Server) Start() error {
 	}
 
 	log.Printf("[WS] WebSocket server listening on 0.0.0.0:%d (all interfaces)", s.port)
+	if s.tlsCertFile != "" && s.tlsKeyFile != "" {
+		return s.server.ListenAndServeTLS(s.tlsCertFile, s.tlsKeyFile)
+	}
 	return s.server.ListenAndServe()
 }
 
@@ -195,14 +206,14 @@ func (s *Server) handlePeerMessages(conn *websocket.Conn, clientID string) {
 
 func (s *Server) handleClientMessages(client *Client) {
 	// Keep connection alive by reading messages.
-	// ВАЖЛИВО: при помилці читання з'єднання вважаємо зламаним і
-	// завершуємо цикл, щоб уникнути panic "repeated read on failed websocket connection".
+	// IMPORTANT: on read error treat the connection as broken and exit the loop
+	// to avoid panic "repeated read on failed websocket connection".
 	for {
 		var msg map[string]interface{}
 		if err := client.Conn.ReadJSON(&msg); err != nil {
 			log.Printf("[SOCKET] Error reading from client %s: %v", client.ID, err)
-			// На будь-яку помилку закриваємо сокет і виходимо з циклу.
-			// Gorilla WebSocket не дозволяє безпечно продовжувати читання після фатальної помилки.
+			// On any error close the socket and exit the loop.
+			// Gorilla WebSocket does not allow safe continued reads after a fatal error.
 			_ = client.Conn.Close()
 			break
 		}

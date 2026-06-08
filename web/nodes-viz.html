@@ -172,9 +172,9 @@
       <div class="collapse-content">
         <p style="font-size:0.85rem; color:#8b949e; margin:0 0 8px 0;">Formula: Burn % + Treasury % + L1 % + L2 % = 100. Implementation same as Core (node rating - Core formula).</p>
         <div id="rewardSummary" style="font-size:0.85rem; margin-bottom:10px; padding:8px; background:#0d1117; border-radius:6px;">
-          <span>Розподіл: Спалення <strong id="cfgBurn">0</strong>% → Скарбниця <strong id="cfgTreasury">20</strong>% → L1 <strong id="cfgL1">40</strong>% → L2 <strong id="cfgL2">40</strong>%</span><br>
-          <span>Спалено всього: <strong id="totalBurned">0</strong></span> | <span>Скарбниця всього: <strong id="totalTreasury">0</strong></span><br>
-          <span style="font-size:0.8rem; color:#8b949e;">L1/L2 винагорода ділиться між усіма, хто голосував «так» (пропорційно рейтингу); мін. 1 на ноду, якщо пул достатній.</span>
+          <span>Split: Burn <strong id="cfgBurn">0</strong>% → Treasury <strong id="cfgTreasury">20</strong>% → L1 <strong id="cfgL1">40</strong>% → L2 <strong id="cfgL2">40</strong>%</span><br>
+          <span>Total burned: <strong id="totalBurned">0</strong></span> | <span>Total treasury: <strong id="totalTreasury">0</strong></span><br>
+          <span style="font-size:0.8rem; color:#8b949e;">L1/L2 reward is split among all yes-voters (proportional to rating); min 1 per node when the pool is sufficient.</span>
         </div>
         <table class="analytics-table" style="max-width:420px; margin-bottom:16px;">
           <thead>
@@ -436,7 +436,7 @@
             appendWsLog('ERR', 'ERROR', null);
           };
         } catch (e) {
-          wsStatus(false, e.message || 'помилка');
+          wsStatus(false, e.message || 'error');
           appendWsLog('ERR', 'EXCEPTION', e && e.message ? e.message : String(e));
         }
       }).catch(function(e) {
@@ -575,7 +575,7 @@
           if (el('totalBurned')) el('totalBurned').textContent = stats.totalBurned || 0;
           if (el('totalTreasury')) el('totalTreasury').textContent = stats.totalTreasury || 0;
         }
-        tbody.innerHTML = '<tr><td colspan="3">- (завантажте дані)</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="3">- (load data)</td></tr>';
       });
     }
 
@@ -610,7 +610,7 @@
           var votesStr = total ? yesCount + ' / ' + total : '-';
           var repStr = (r.reputationScore != null) ? rep.toFixed(3) : '-';
           var selStr = (r.selectionWeight != null) ? sel.toFixed(3) : '-';
-          return '<tr><td>' + shortId(r.nodeId) + (r.nodeId === myId ? ' <em>(ця нода)</em>' : '') + '</td><td class="num">' + repStr + '</td><td class="num">' + selStr + '</td><td class="num">' + votesStr + '</td></tr>';
+          return '<tr><td>' + shortId(r.nodeId) + (r.nodeId === myId ? ' <em>(this node)</em>' : '') + '</td><td class="num">' + repStr + '</td><td class="num">' + selStr + '</td><td class="num">' + votesStr + '</td></tr>';
         }).join('');
       }
       get('/api/node-ratings').then(function(d) {
@@ -692,20 +692,20 @@
 
     function runRealL1L2() {
       if (!nodes.length) { loadNodes(); setTimeout(runRealL1L2, 500); return; }
-      status(true, 'L1→L2: перевірка…');
+      status(true, 'L1→L2: checking…');
       get('/api/stats').then(function(st) {
         var mempoolCount = st.mempoolCount != null ? st.mempoolCount : 0;
         var pendingCount = st.pendingCount != null ? st.pendingCount : 0;
         if (mempoolCount > 0) {
-          status(true, 'L1→L2: збір блоку з mempool (' + mempoolCount + ' TX)…');
+          status(true, 'L1→L2: collecting block from mempool (' + mempoolCount + ' TX)…');
           return post('/api/l1-collect', {}).then(function(d) {
             if (d.success) {
-              status(true, 'L1 зібрав блок (67% так), TX: ' + (d.moved || 0));
+              status(true, 'L1 collected block (67% yes), TX: ' + (d.moved || 0));
               refreshMempool(); refreshPendingBlock(); refreshMetrics(); refreshLastVotes(); refreshNodeRatings();
             } else {
-              var msg = (d.error || 'L1 помилка') + (d.need != null ? ' (потрібно так: ' + d.need + ')' : '');
+              var msg = (d.error || 'L1 error') + (d.need != null ? ' (yes votes required: ' + d.need + ')' : '');
               if ((d.error || '').indexOf('mempool') >= 0) {
-                msg = 'Mempool порожній на ноді, що виконує L1. Додайте TX (кнопка «Додати в mempool»), потім знову «Запустити L1→L2».';
+                msg = 'Mempool empty on the L1 node. Add TX (Add to mempool), then run L1→L2 again.';
                 refreshMempool(); refreshMetrics();
               }
               status(false, msg);
@@ -713,10 +713,10 @@
             }
           });
         } else if (pendingCount > 0) {
-          status(true, 'L1→L2: підтвердження блоку (L2)…');
+          status(true, 'L1→L2: confirming block (L2)…');
           return Promise.resolve();
         } else {
-          status(false, 'Mempool порожній - додайте TX, потім запустіть L1→L2');
+          status(false, 'Mempool empty - add TX, then run L1→L2');
           return Promise.resolve();
         }
       }).then(function() {
@@ -724,16 +724,16 @@
       }).then(function(st) {
         var pendingCount = st.pendingCount != null ? st.pendingCount : 0;
         if (pendingCount > 0) {
-          status(true, 'L2: підтвердження блоку…');
+          status(true, 'L2: confirming block…');
           return post('/api/l2-confirm', {}).then(function(d) {
             if (d.success && d.block) {
               var b = d.block;
               addAnalyticsVote(b.blockNumber, d.l1Yes || 0, d.l1No || 0, d.l2Yes || 0, d.l2No || 0, 0);
-              status(true, 'L2 підтвердив блок №' + b.blockNumber + ', TX: ' + (d.moved || 0));
+              status(true, 'L2 confirmed block #' + b.blockNumber + ', TX: ' + (d.moved || 0));
               refreshPendingBlock(); refreshChain(); refreshAnalytics(); refreshMetrics();
               refreshLastVotes(); refreshNodeRatings(); refreshNodeEarnings();
             } else {
-              status(false, (d.error || 'L2 помилка') + (d.need != null ? ' (потрібно так: ' + d.need + ')' : ''));
+              status(false, (d.error || 'L2 error') + (d.need != null ? ' (yes votes required: ' + d.need + ')' : ''));
               refreshLastVotes();
             }
           });
@@ -742,9 +742,9 @@
           return Promise.resolve();
         }
       }).catch(function(e) {
-        var msg = e.message || 'Помилка L1/L2';
+        var msg = e.message || 'L1/L2 error';
         if (msg.indexOf('mempool') !== -1 || msg.indexOf('400') === 0) {
-          msg = 'Mempool порожній. Додайте TX (вкладка «Надіслати TX» → «Додати в mempool»), потім «Запустити L1→L2».';
+          msg = 'Mempool empty. Add TX (Send TX tab → Add to mempool), then Run L1→L2.';
           refreshMempool(); refreshMetrics();
         }
         status(false, msg);
@@ -763,7 +763,7 @@
         post('/api/test-set-load', { currentTasks: cur, maxCapacity: max }).then(function(d) {
           el('testSetLoadResult').textContent = d.message || ('loadScore=' + (d.loadScore != null ? d.loadScore : '') + ', weight=' + (d.selectionWeight != null ? d.selectionWeight : ''));
           refreshNodeRatings();
-        }).catch(function(e) { el('testSetLoadResult').textContent = 'Помилка: ' + (e.message || ''); });
+        }).catch(function(e) { el('testSetLoadResult').textContent = 'Error: ' + (e.message || ''); });
       };
     }
 
@@ -781,9 +781,9 @@
       get('/pg-bal/' + encodeURIComponent(walletState.address)).then(function(d) {
         var bal = (d && d.balance) ? d.balance : '0';
         var elB = el('balanceDisplay');
-        if (elB) elB.textContent = 'Баланс: ' + bal + ' μPLP';
+        if (elB) elB.textContent = 'Balance: ' + bal + ' μPLP';
       }).catch(function() {
-        if (el('balanceDisplay')) el('balanceDisplay').textContent = 'Баланс: -';
+        if (el('balanceDisplay')) el('balanceDisplay').textContent = 'Balance: -';
       });
     }
 
@@ -897,12 +897,12 @@
             if (bal >= minAmount) {
               resolve(bal);
             } else if (Date.now() > deadline) {
-              reject(new Error('Баланс не з\'явився вчасно'));
+              reject(new Error('Balance did not appear in time'));
             } else {
               setTimeout(poll, 3000);
             }
           }).catch(function() {
-            if (Date.now() > deadline) reject(new Error('Баланс недоступний'));
+            if (Date.now() > deadline) reject(new Error('Balance unavailable'));
             else setTimeout(poll, 3000);
           });
         }
@@ -957,10 +957,10 @@
     el('btnL1Collect').onclick = function() {
       post('/api/l1-collect', {}).then(function(d) {
         if (d.success) {
-          status(true, 'L1 зібрав блок (67% так), TX: ' + (d.moved || 0));
+          status(true, 'L1 collected block (67% yes), TX: ' + (d.moved || 0));
           refreshMempool(); refreshPendingBlock();
           refreshLastVotes();
-        } else { status(false, (d.error || 'Помилка') + (d.yes != null ? ' (так: ' + d.yes + ', потрібно: ' + d.need + ')' : '')); }
+        } else { status(false, (d.error || 'Error') + (d.yes != null ? ' (yes: ' + d.yes + ', required: ' + d.need + ')' : '')); }
       }).catch(function(e) { status(false, e.message || 'Failed to fetch'); refreshMempool(); refreshPendingBlock(); });
     };
 
@@ -971,12 +971,12 @@
         if (d.success && d.block) {
           var b = d.block;
           addAnalyticsVote(b.blockNumber, d.l1Yes || 0, d.l1No || 0, d.l2Yes || 0, d.l2No || 0, durationMs);
-          status(true, 'L2 підтвердив блок (70% так) ' + b.blockNumber + ', TX: ' + (d.moved || 0));
+          status(true, 'L2 confirmed block (70% yes) ' + b.blockNumber + ', TX: ' + (d.moved || 0));
           refreshPendingBlock();
           refreshChain();
           refreshAnalytics();
           refreshLastVotes();
-        } else { status(false, (d.error || 'Помилка') + (d.yes != null ? ' (так: ' + d.yes + ', потрібно: ' + d.need + ')' : '')); }
+        } else { status(false, (d.error || 'Error') + (d.yes != null ? ' (yes: ' + d.yes + ', required: ' + d.need + ')' : '')); }
       }).catch(function(e) { status(false, e.message || 'Failed to fetch'); refreshPendingBlock(); refreshChain(); });
     };
 

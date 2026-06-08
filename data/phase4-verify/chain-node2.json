@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "blockCounter": 2,
+  "totalFeesCollected": 0,
+  "blocks": [
+    {
+      "blockNumber": 0,
+      "timestamp": 1780950154,
+      "txHashes": [
+        "20260608212234-hash"
+      ],
+      "txCount": 1,
+      "totalFees": 0,
+      "l1Yes": 3,
+      "l2Yes": 3,
+      "durationMs": 5,
+      "l1BeneficiaryNodeId": "71866c77-58ce-4eed-97b2-c5d315695c28",
+      "l2ConfirmerNodeId": "71866c77-58ce-4eed-97b2-c5d315695c28",
+      "l1Votes": {
+        "5dd9ab63-7894-4486-9184-388c184913a5": true,
+        "71866c77-58ce-4eed-97b2-c5d315695c28": true,
+        "9779a073-a42e-4f5e-9ffc-42a00829f412": true
+      },
+      "l2Votes": {
+        "5dd9ab63-7894-4486-9184-388c184913a5": true,
+        "71866c77-58ce-4eed-97b2-c5d315695c28": true,
+        "9779a073-a42e-4f5e-9ffc-42a00829f412": true
+      }
+    },
+    {
+      "blockNumber": 1,
+      "timestamp": 1780950334,
+      "txHashes": [
+        "20260608212534-hash"
+      ],
+      "txCount": 1,
+      "totalFees": 0,
+      "blockHash": "a6bcf833d072b17514d114cf742160587f7af613aa1f6e3e56e7b55e71aefe34",
+      "merkleRoot": "0",
+      "stateRoot": "92f941ef2d9ed33d62de4cc4b1010987e659ed9a0b03c4d84e7725f10bcbfaa6",
+      "previousHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "producerNodeId": "22c2c087-68fd-4eb5-8275-1337c18b40f2",
+      "l1Yes": 3,
+      "l2Yes": 3,
+      "durationMs": 17,
+      "l1BeneficiaryNodeId": "0bb9f1ee-ddf8-4332-8d10-b2d6a6054c31",
+      "l2ConfirmerNodeId": "22c2c087-68fd-4eb5-8275-1337c18b40f2",
+      "l1Votes": {
+        "0bb9f1ee-ddf8-4332-8d10-b2d6a6054c31": true,
+        "22c2c087-68fd-4eb5-8275-1337c18b40f2": true,
+        "b8389e83-4577-4662-94b4-2c5310565a87": true
+      },
+      "l2Votes": {
+        "0bb9f1ee-ddf8-4332-8d10-b2d6a6054c31": true,
+        "22c2c087-68fd-4eb5-8275-1337c18b40f2": true,
+        "b8389e83-4577-4662-94b4-2c5310565a87": true
+      }
+    }
+  ],
+  "transactions": [
+    {
+      "hash": "20260608212234-hash",
+      "from": "faucet",
+      "to": "PxAlice",
+      "value": "1000000",
+      "fee": "0",
+      "nonce": 0,
+      "timestamp": 1780950154,
+      "type": "faucet",
+      "assetType": "native",
+      "amount": 1000000
+    },
+    {
+      "hash": "20260608212534-hash",
+      "from": "faucet",
+      "to": "PxAlice",
+      "value": "1000000",
+      "fee": "0",
+      "nonce": 0,
+      "timestamp": 1780950334,
+      "type": "faucet",
+      "assetType": "native",
+      "amount": 1000000
+    }
+  ]
+}

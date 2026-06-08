@@ -15,6 +15,7 @@ import (
 	"platarium-gateway-go/internal/blockchain"
 	"platarium-gateway-go/internal/handlers"
 	"platarium-gateway-go/internal/logger"
+	"platarium-gateway-go/internal/network"
 	"platarium-gateway-go/internal/nodes"
 	"platarium-gateway-go/internal/websocket"
 
@@ -22,9 +23,16 @@ import (
 )
 
 var (
-	portREST = flag.Int("port", 1812, "REST API port")
-	portWS   = flag.Int("ws", 1813, "WebSocket server port")
-	testnet  = flag.Bool("testnet", false, "Test network mode: requires Platarium Core (platarium-cli) for transaction validation; rejects TX without valid signature")
+	portREST  = flag.Int("port", 1812, "REST API port")
+	portWS    = flag.Int("ws", 1813, "WebSocket server port")
+	testnet   = flag.Bool("testnet", false, "Test network mode: requires Platarium Core (platarium-cli) for transaction validation; rejects TX without valid signature")
+	stateFile = flag.String("state-file", "", "Core state file path (default: PLATARIUM_STATE_FILE env or data/core-state.json)")
+	chainFile = flag.String("chain-file", "", "Chain persistence file (default: derived from state file or PLATARIUM_CHAIN_FILE)")
+	tlsCert   = flag.String("tls-cert", "", "TLS certificate file for REST (or PLATARIUM_TLS_CERT)")
+	tlsKey    = flag.String("tls-key", "", "TLS private key file for REST (or PLATARIUM_TLS_KEY)")
+	wsTLSCert = flag.String("ws-tls-cert", "", "TLS cert for WebSocket (defaults to --tls-cert)")
+	wsTLSKey  = flag.String("ws-tls-key", "", "TLS key for WebSocket (defaults to --tls-key)")
+	peerTLSCA = flag.String("peer-tls-ca", "", "CA bundle for wss peer connections (PLATARIUM_PEER_TLS_CA)")
 )
 
 func getLocalIP() string {
@@ -45,6 +53,38 @@ func getLocalIP() string {
 
 func main() {
 	flag.Parse()
+
+	if *stateFile != "" {
+		os.Setenv("PLATARIUM_STATE_FILE", *stateFile)
+	}
+	if *chainFile != "" {
+		os.Setenv("PLATARIUM_CHAIN_FILE", *chainFile)
+	}
+
+	if *chainFile != "" {
+		os.Setenv("PLATARIUM_CHAIN_FILE", *chainFile)
+	}
+
+	restCert := *tlsCert
+	restKey := *tlsKey
+	if restCert == "" {
+		restCert = os.Getenv("PLATARIUM_TLS_CERT")
+	}
+	if restKey == "" {
+		restKey = os.Getenv("PLATARIUM_TLS_KEY")
+	}
+	wsCert := *wsTLSCert
+	wsKey := *wsTLSKey
+	if wsCert == "" {
+		wsCert = restCert
+	}
+	if wsKey == "" {
+		wsKey = restKey
+	}
+	peerCA := *peerTLSCA
+	if peerCA == "" {
+		peerCA = os.Getenv("PLATARIUM_PEER_TLS_CA")
+	}
 
 	log.Println("[Logging activated]")
 	if *testnet {
@@ -67,12 +107,30 @@ func main() {
 
 	// Initialize nodes manager
 	nodesManager := nodes.NewNodesManager(*portWS, nodeHost)
+	wsScheme := "ws"
+	if network.TLSEnabled(wsCert, wsKey) {
+		wsScheme = "wss"
+	}
+	nodesManager.SetNodeAddress(fmt.Sprintf("%s://%s:%d", wsScheme, nodeHost, *portWS))
 	nodesManager.SetRestBaseURL("http://" + nodeHost + ":" + strconv.Itoa(*portREST))
+	if network.TLSEnabled(restCert, restKey) {
+		nodesManager.SetRestBaseURL("https://" + nodeHost + ":" + strconv.Itoa(*portREST))
+	}
+	if peerCA != "" {
+		if peerTLS, err := network.LoadPeerTLS(peerCA); err != nil {
+			log.Fatalf("Failed to load peer TLS CA: %v", err)
+		} else {
+			nodesManager.SetPeerTLSConfig(peerTLS)
+		}
+	}
 	logger.SetNodeID(nodesManager.GetNodeID())
 	log.Printf("[NODE] Initialized node: %s at ws://%s:%d", nodesManager.GetNodeID(), nodeHost, *portWS)
 
 	// Initialize WebSocket server
 	wsServer := websocket.NewServer(*portWS, bc, nodesManager)
+	if network.TLSEnabled(wsCert, wsKey) {
+		wsServer.SetTLS(wsCert, wsKey)
+	}
 
 	// Setup REST API
 	router := mux.NewRouter()
@@ -98,6 +156,7 @@ func main() {
 	router.HandleFunc("/rpc/status", handler.GetDetailedStatus).Methods("GET")
 	router.HandleFunc("/rpc/sockets", handler.GetSockets).Methods("GET")
 	router.HandleFunc("/rpc/ping", handler.PingPeer).Methods("GET")
+	router.HandleFunc("/rpc/v1", handler.ChainRPC).Methods("POST")
 	
 	// Blockchain API routes
 	router.HandleFunc("/pg-bal/{address}", handler.GetBalance).Methods("GET")
@@ -148,6 +207,13 @@ func main() {
 	}
 
 	go func() {
+		if network.TLSEnabled(restCert, restKey) {
+			log.Printf("[REST] REST API running with TLS on 0.0.0.0:%d", *portREST)
+			if err := restServer.ListenAndServeTLS(restCert, restKey); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("REST API server error: %v", err)
+			}
+			return
+		}
 		log.Printf("[REST] REST API running on 0.0.0.0:%d (all interfaces)", *portREST)
 		if err := restServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("REST API server error: %v", err)

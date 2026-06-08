@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "asset_balances": [
+    [
+      "PxAlice",
+      "PLP",
+      "1000000"
+    ]
+  ],
+  "uplp_balances": [
+    [
+      "PxAlice",
+      "10000"
+    ]
+  ],
+  "nonces": []
+}
