@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "blockCounter": 2,
+  "totalFeesCollected": 1,
+  "blocks": [
+    {
+      "blockNumber": 0,
+      "timestamp": 1780948820,
+      "txHashes": [
+        "20260608210020-hash"
+      ],
+      "txCount": 1,
+      "totalFees": 0,
+      "blockHash": "6e4e2faf5a64b23d895b8f5c85b881fc0a705535eaf6d825d0d5fb1b652568fe",
+      "merkleRoot": "0",
+      "stateRoot": "d62eb7b0fbdd761c87a1e93cf9c54f3cfc5bb108fdbc5758b6d61dd1b3cdeb7b",
+      "previousHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "producerNodeId": "cefda6b4-21e1-4ef7-89bf-14814c23644d"
+    },
+    {
+      "blockNumber": 1,
+      "timestamp": 1780948820,
+      "txHashes": [
+        "5c4818d1aa1557b53ee4a50ff65f808558a1e670fb022138ec21665570cd26f3"
+      ],
+      "txCount": 1,
+      "totalFees": 1
+    }
+  ],
+  "transactions": [
+    {
+      "hash": "20260608210020-hash",
+      "from": "faucet",
+      "to": "Px028b6e29e27fa2ca10d2378e02e312d98d14c9e6cd76a2f49f7a9060cdd2ff6c56",
+      "value": "1000000",
+      "fee": "0",
+      "nonce": 0,
+      "timestamp": 1780948820,
+      "type": "faucet",
+      "assetType": "native",
+      "amount": 1000000
+    },
+    {
+      "hash": "5c4818d1aa1557b53ee4a50ff65f808558a1e670fb022138ec21665570cd26f3",
+      "from": "Px028b6e29e27fa2ca10d2378e02e312d98d14c9e6cd76a2f49f7a9060cdd2ff6c56",
+      "to": "Px0278504cf825f820c71ad5b5e857bb2ea2b54537c052a387f12d098e485c382a09",
+      "value": "1000",
+      "fee": "1",
+      "nonce": 0,
+      "timestamp": 1780948820,
+      "type": "transfer",
+      "assetType": "native",
+      "sig_main": "7d8b8e8053cbb117f8f73e312da5708cabeaaa33d5bcab2b292b883f7d2690f66dbaedf463b8a0073bf286b38d401d8963b86c87d5afd7fde7dc67d4400f7a4b",
+      "sig_derived": "1330321c7f93c91c63d7967111268773592e7efa23bb8680d360f9b793c97dab6389a4f4ff27b3e4aeb0f752a4da5e3bae139d642e83d33016a579dc4d1e2566",
+      "pub_main": "0247a9941dc3211ec5d63b8abe32eaabc9e667a4efdac8773206c71c4dcc57fe4b",
+      "pub_derived": "03bdc13825868539e9cd35c52e3e8e7eb1220620ca0fbe40ad3b7341cb7e879c11",
+      "asset": "PLP",
+      "amount": 1000,
+      "fee_uplp": 1
+    }
+  ]
+}

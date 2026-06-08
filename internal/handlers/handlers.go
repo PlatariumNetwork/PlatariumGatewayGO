@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -40,7 +39,7 @@ type l1VoteRound struct {
 	blockId       string
 	votes         map[string]bool // nodeId -> yes
 	totalExpected int
-	committee     map[string]bool // якщо не nil - рахуються лише голоси з committee (Core: менше валідаторів при навантаженні)
+	committee     map[string]bool // if non-nil, only votes from committee count (Core: fewer validators under load)
 	done          chan bool
 	closed        bool
 	mu            sync.Mutex
@@ -83,7 +82,7 @@ type l2VoteRound struct {
 	blockId       string
 	votes         map[string]bool
 	totalExpected int
-	committee     map[string]bool // лише голоси з committee рахуються (Core: менше валідаторів при навантаженні)
+	committee     map[string]bool // only committee votes count (Core: fewer validators under load)
 	done          chan bool
 	closed        bool
 	mu            sync.Mutex
@@ -102,6 +101,28 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 		log.Println("[INFO] Rust Core initialized successfully")
 	}
 
+	if rustCore != nil {
+		stateFile := os.Getenv("PLATARIUM_STATE_FILE")
+		if stateFile == "" {
+			stateFile = "data/core-state.json"
+		}
+		ledger, lerr := core.NewLedgerService(rustCore, stateFile, testnet)
+		if lerr != nil {
+			if testnet {
+				return nil, lerr
+			}
+			log.Printf("[WARN] Core ledger not initialized: %v", lerr)
+		} else {
+			bc.SetLedger(ledger)
+			log.Printf("[INFO] Core ledger state file: %s", ledger.StateFilePath())
+		}
+	}
+
+	stateFile := os.Getenv("PLATARIUM_STATE_FILE")
+	if stateFile == "" {
+		stateFile = "data/core-state.json"
+	}
+
 	h := &Handler{
 		blockchain:      bc,
 		nodesManager:    nm,
@@ -114,7 +135,11 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 		l1VotedIds:      make(map[string]bool),
 		l2VotedIds:      make(map[string]bool),
 	}
+	if bc.Ledger() != nil {
+		h.initChainPersistence(stateFile)
+	}
 	h.RegisterVoteCallbacks()
+	h.RegisterSyncCallbacks()
 	return h, nil
 }
 
@@ -144,16 +169,46 @@ func (h *Handler) onMempoolAdd(txMap map[string]interface{}) {
 	if tx == nil {
 		return
 	}
-	if tx.SigMain != "" && h.rustCore != nil {
-		coreJSON, ok := txToCoreJSON(tx)
-		if ok {
-			if valid, err := h.rustCore.ValidateTransaction(coreJSON); err != nil || !valid {
-				logger.Warn("mempool:add rejected invalid signed tx %s: %v", tx.Hash, err)
-				return
-			}
-		}
+	if err := h.validateTxForMempool(tx); err != nil {
+		logger.Warn("mempool:add rejected tx %s: %v", tx.Hash, err)
+		return
 	}
 	_ = h.blockchain.AddToMempool(tx)
+}
+
+// validateTxForMempool checks Core state applicability before mempool admission.
+func (h *Handler) validateTxForMempool(tx *blockchain.Transaction) error {
+	if tx == nil {
+		return fmt.Errorf("nil transaction")
+	}
+	if tx.From == blockchain.FaucetAddress {
+		return nil
+	}
+	ledger := h.blockchain.Ledger()
+	if ledger == nil {
+		if h.testnet {
+			return fmt.Errorf("core ledger unavailable")
+		}
+		if tx.SigMain != "" && h.rustCore != nil {
+			coreJSON, ok := txToCoreJSON(tx)
+			if ok {
+				valid, err := h.rustCore.ValidateTransaction(coreJSON)
+				if err != nil || !valid {
+					return fmt.Errorf("validate-tx: %v", err)
+				}
+			}
+		}
+		return nil
+	}
+	coreJSON, ok := txToCoreJSON(tx)
+	if !ok {
+		if h.testnet {
+			return fmt.Errorf("transaction missing Core signature fields")
+		}
+		return nil
+	}
+	_, err := ledger.ValidateTx(coreJSON)
+	return err
 }
 
 func (h *Handler) onPendingBlockSync(pendingMaps []map[string]interface{}) {
@@ -165,7 +220,8 @@ func (h *Handler) onPendingBlockSync(pendingMaps []map[string]interface{}) {
 		}
 	}
 	if len(txs) > 0 {
-		h.blockchain.SetPendingBlock(txs)
+		h.blockchain.SyncPendingBlock(txs)
+		logger.Info("Pending block synced from peer (%d txs)", len(txs))
 	}
 }
 
@@ -239,8 +295,14 @@ func txToCoreJSON(tx *blockchain.Transaction) (jsonStr string, ok bool) {
 		"nonce":      tx.Nonce,
 		"reads":      reads,
 		"writes":     writes,
-		"sig_main":   tx.SigMain,
+		"sig_main":    tx.SigMain,
 		"sig_derived": tx.SigDerived,
+	}
+	if tx.PubMain != "" {
+		m["pub_main"] = tx.PubMain
+	}
+	if tx.PubDerived != "" {
+		m["pub_derived"] = tx.PubDerived
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -278,7 +340,7 @@ func (h *Handler) onL2VoteResult(votes map[string]bool, accepted bool) {
 	h.lastL1VotesMu.Unlock()
 }
 
-func (h *Handler) onL1Proposal(blockId, proposerNodeId string, txCount int) {
+func (h *Handler) onL1Proposal(blockId, proposerNodeId string, txCount int, txHashes []string) {
 	myId := h.nodesManager.GetNodeID()
 	if proposerNodeId == myId {
 		return
@@ -290,11 +352,22 @@ func (h *Handler) onL1Proposal(blockId, proposerNodeId string, txCount int) {
 	}
 	h.l1VotedIds[blockId] = true
 	h.l1VoteRoundMu.Unlock()
-	yes := rand.Float32() < 0.9
-	logger.Info("L1 received proposal from %s (txCount=%d), sending vote yes=%v", shortId(proposerNodeId), txCount, yes)
-	go h.nodesManager.BroadcastBlockchainEvent("l1_vote", map[string]interface{}{
-		"blockId": blockId, "nodeId": myId, "yes": yes,
-	}, myId)
+	go h.submitL1Vote(blockId, proposerNodeId, txCount, txHashes)
+}
+
+func (h *Handler) onL2Proposal(blockId, proposerNodeId string, txHashes []string) {
+	myId := h.nodesManager.GetNodeID()
+	if proposerNodeId == myId {
+		return
+	}
+	h.l2VoteRoundMu.Lock()
+	if h.l2VotedIds[blockId] {
+		h.l2VoteRoundMu.Unlock()
+		return
+	}
+	h.l2VotedIds[blockId] = true
+	h.l2VoteRoundMu.Unlock()
+	go h.submitL2Vote(blockId, proposerNodeId, txHashes)
 }
 
 func (h *Handler) onL1Vote(blockId, nodeId string, yes bool) {
@@ -305,7 +378,7 @@ func (h *Handler) onL1Vote(blockId, nodeId string, yes bool) {
 		return
 	}
 	if r.committee != nil && !r.committee[nodeId] {
-		return // Core: рахуємо лише голоси обраного комітету (менше валідаторів при навантаженні)
+		return // Core: count only votes from the selected committee (fewer validators under load)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -334,42 +407,6 @@ func (h *Handler) onL1Vote(blockId, nodeId string, yes bool) {
 	}
 }
 
-func (h *Handler) onL2Proposal(blockId, proposerNodeId string) {
-	myId := h.nodesManager.GetNodeID()
-	if proposerNodeId == myId {
-		return
-	}
-	h.l2VoteRoundMu.Lock()
-	if h.l2VotedIds[blockId] {
-		h.l2VoteRoundMu.Unlock()
-		return
-	}
-	h.l2VotedIds[blockId] = true
-	h.l2VoteRoundMu.Unlock()
-	yes := true
-	if h.rustCore != nil {
-		pending := h.blockchain.GetPendingBlock()
-		for _, tx := range pending {
-			coreJSON, ok := txToCoreJSON(tx)
-			if !ok {
-				continue
-			}
-			valid, err := h.rustCore.ValidateTransaction(coreJSON)
-			if err != nil || !valid {
-				logger.Info("L2 block validation failed for tx %s: %v", tx.Hash, err)
-				yes = false
-				break
-			}
-		}
-	} else {
-		yes = rand.Float32() < 0.9
-	}
-	logger.Info("L2 received proposal from %s, sending vote yes=%v", shortId(proposerNodeId), yes)
-	go h.nodesManager.BroadcastBlockchainEvent("l2_vote", map[string]interface{}{
-		"blockId": blockId, "nodeId": myId, "yes": yes,
-	}, myId)
-}
-
 // voteRoundTimeout returns timeout for the vote round; scales with node count so many nodes have time to respond.
 func voteRoundTimeout(totalExpected int) time.Duration {
 	d := VoteRoundTimeoutMin + time.Duration(totalExpected)*VoteRoundTimeoutPerNode
@@ -380,7 +417,7 @@ func voteRoundTimeout(totalExpected int) time.Duration {
 }
 
 // updateVoteStatsFromRound updates node registry vote stats (for reputation). Correct = (votedYes == accepted).
-// If expectedVoters != nil (комітет L1/L2), штрафуємо лише тих із комітету, хто не проголосував.
+// If expectedVoters != nil (L1/L2 committee), penalize only committee members who did not vote.
 func (h *Handler) updateVoteStatsFromRound(votes map[string]bool, accepted bool, expectedVoters map[string]bool) {
 	for nodeId, votedYes := range votes {
 		h.nodeRegistry.EnsureNode(nodeId, 0, 1)
@@ -424,7 +461,7 @@ func (h *Handler) updateVoteStatsFromRound(votes map[string]bool, accepted bool,
 	}
 }
 
-// distributePool splits pool among YES-voters proportional to SelectionWeight (Core: винагорода всім учасникам голосування).
+// distributePool splits pool among YES-voters proportional to SelectionWeight (Core: reward all voting participants).
 // When pool >= number of voters, each voter gets at least 1; remainder is distributed by weight.
 func (h *Handler) distributePool(pool int64, voters map[string]bool) map[string]int64 {
 	shares := make(map[string]int64)
@@ -441,7 +478,7 @@ func (h *Handler) distributePool(pool int64, voters map[string]bool) map[string]
 	if n == 0 {
 		return shares
 	}
-	// Weights for proportional split (рейтинг враховується).
+	// Weights for proportional split (reputation is included).
 	var totalWeight int64
 	weights := make(map[string]int64)
 	for _, id := range yesVoters {
@@ -458,7 +495,7 @@ func (h *Handler) distributePool(pool int64, voters map[string]bool) map[string]
 			weights[id] = 1
 		}
 	}
-	// Core: кожен учасник голосування отримує частку; при достатньому пулі - мінімум 1.
+	// Core: each voting participant gets a share; minimum 1 when the pool is large enough.
 	remainder := pool
 	if pool >= int64(n) {
 		remainder = pool - int64(n)
@@ -469,7 +506,7 @@ func (h *Handler) distributePool(pool int64, voters map[string]bool) map[string]
 	if remainder <= 0 {
 		return shares
 	}
-	// Розподіл залишку пропорційно вазі (репутація × (1−load)).
+	// Distribute remainder proportionally by weight (reputation × (1−load)).
 	var distributed int64
 	for _, id := range yesVoters {
 		s := remainder * weights[id] / totalWeight
@@ -525,7 +562,7 @@ func (h *Handler) onFeeDistribution(data map[string]interface{}) {
 		}
 	}
 	h.recordEarnings(l1Shares, l2Shares)
-	// Sync burn/treasury so all nodes show same Спалено всього | Скарбниця всього.
+	// Sync burn/treasury so all nodes show the same total burned | total treasury.
 	var burn, treasury int64
 	if b, ok := data["burn"].(float64); ok {
 		burn = int64(b)
@@ -573,6 +610,21 @@ func (h *Handler) onBlockConfirmed(data map[string]interface{}) {
 	if s, ok := data["l2ConfirmerNodeId"].(string); ok {
 		block.L2ConfirmerNodeId = s
 	}
+	if s, ok := data["blockHash"].(string); ok {
+		block.BlockHash = s
+	}
+	if s, ok := data["merkleRoot"].(string); ok {
+		block.MerkleRoot = s
+	}
+	if s, ok := data["stateRoot"].(string); ok {
+		block.StateRoot = s
+	}
+	if s, ok := data["previousHash"].(string); ok {
+		block.PreviousHash = s
+	}
+	if s, ok := data["producerNodeId"].(string); ok {
+		block.ProducerNodeID = s
+	}
 	if m, ok := data["l1Votes"].(map[string]interface{}); ok && len(m) > 0 {
 		block.L1Votes = make(map[string]bool, len(m))
 		for k, val := range m {
@@ -606,7 +658,12 @@ func (h *Handler) onBlockConfirmed(data map[string]interface{}) {
 		}
 	}
 
-	if h.blockchain.AddConfirmedBlock(block, txs) {
+	added, err := h.blockchain.AddConfirmedBlock(block, txs)
+	if err != nil {
+		logger.Warn("Block #%d sync apply failed: %v", block.BlockNumber, err)
+		return
+	}
+	if added {
 		logger.Info("Block #%d synced from peer (txCount=%d fees=%d)", block.BlockNumber, block.TxCount, block.TotalFees)
 		h.wsServer.BroadcastEvent("blockConfirmed", map[string]interface{}{
 			"blockNumber": block.BlockNumber,
@@ -624,7 +681,7 @@ func (h *Handler) onL2Vote(blockId, nodeId string, yes bool) {
 		return
 	}
 	if r.committee != nil && !r.committee[nodeId] {
-		return // Core: рахуємо лише голоси обраного комітету
+		return // Core: count only votes from the selected committee
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -736,11 +793,9 @@ func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
 	
 	// Check Balance system (check if blockchain is initialized)
 	if h.blockchain != nil {
-		// Try to get a balance to verify it works
-		// GetBalance always returns a string (even "0" for non-existent addresses)
-		testBalance := h.blockchain.GetBalance("test")
-		// If we get a response (even "0"), the system is working
-		if testBalance != "" {
+		if _, err := h.blockchain.GetBalance("test"); err == nil {
+			components["Balance"] = "ok"
+		} else if h.blockchain.Ledger() != nil {
 			components["Balance"] = "ok"
 		} else {
 			components["Balance"] = "not_ok"
@@ -802,10 +857,24 @@ func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	address := vars["address"]
-	balance := h.blockchain.GetBalance(address)
+	if h.blockchain.Ledger() == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "Core ledger unavailable",
+		})
+		return
+	}
+	account, err := h.blockchain.GetAccountQuery(address)
+	if err != nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"address": address,
-		"balance": balance,
+		"address":      address,
+		"balance":      account.Balance,
+		"nonce":        account.Nonce,
+		"uplp_balance": account.UplpBalance,
 	})
 }
 
@@ -887,6 +956,12 @@ func (h *Handler) Faucet(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
 		return
 	}
+	if h.blockchain.Ledger() == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "Core ledger unavailable",
+		})
+		return
+	}
 	var body struct {
 		Address string `json:"address"`
 	}
@@ -921,7 +996,7 @@ func (h *Handler) Faucet(w http.ResponseWriter, r *http.Request) {
 		"credited": FaucetAmountUplp,
 		"txHash":   tx.Hash,
 		"balance":  "0",
-		"message":  "TX крану в mempool. Запустіть L1→L2 (або чекайте авто), щоб підтвердити блок і отримати баланс.",
+		"message":  "Faucet TX added to mempool. Run L1→L2 (or wait for auto) to confirm the block and credit the balance.",
 	})
 }
 
@@ -1315,6 +1390,8 @@ func (h *Handler) DemoSendTx(w http.ResponseWriter, r *http.Request) {
 			Nonce      int      `json:"nonce"`
 			SigMain    string   `json:"sig_main"`
 			SigDerived string   `json:"sig_derived"`
+			PubMain    string   `json:"pub_main"`
+			PubDerived string   `json:"pub_derived"`
 			Reads      []string `json:"reads"`
 			Writes     []string `json:"writes"`
 		}
@@ -1334,6 +1411,8 @@ func (h *Handler) DemoSendTx(w http.ResponseWriter, r *http.Request) {
 			AssetType:  "native",
 			SigMain:    coreTx.SigMain,
 			SigDerived: coreTx.SigDerived,
+			PubMain:    coreTx.PubMain,
+			PubDerived: coreTx.PubDerived,
 			Asset:      coreTx.Asset,
 			AmountUplp: coreTx.Amount,
 			FeeUplp:    coreTx.FeeUplp,
@@ -1360,6 +1439,10 @@ func (h *Handler) DemoSendTx(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if err := h.validateTxForMempool(tx); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := h.blockchain.AddToMempool(tx); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1368,7 +1451,7 @@ func (h *Handler) DemoSendTx(w http.ResponseWriter, r *http.Request) {
 	myId := h.nodesManager.GetNodeID()
 	go h.nodesManager.BroadcastBlockchainEvent("mempoolUpdate", map[string]interface{}{"hash": tx.Hash}, myId)
 	go h.nodesManager.BroadcastBlockchainEvent("mempool:add", map[string]interface{}{"tx": txToMap(tx)}, myId)
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"success": true, "transaction": tx, "message": "TX додано в mempool"})
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"success": true, "transaction": tx, "message": "TX added to mempool"})
 }
 
 // shortId for log lines
@@ -1498,9 +1581,29 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	for _, n := range connected {
 		candidates = append(candidates, n.NodeID)
 	}
-	// blockId first so we can use it as deterministic seed for Core committee selection
-	blockId := strconv.FormatInt(time.Now().UnixNano(), 10)
-	// Вся логіка комітету в Core. Навантаження мережі = max load серед кандидатів (щоб при високому load на будь-якій ноді менше валідаторів).
+	// Deterministic blockId from chain inputs (no time-only IDs)
+	blockNum := h.blockchain.NextBlockNumber()
+	stateRoot := ""
+	if ledger := h.blockchain.Ledger(); ledger != nil {
+		stateRoot, _ = ledger.StateRoot()
+	}
+	txHashes := txHashesFromTransactions(mempool)
+	blockId := computeVoteBlockID("l1", blockNum, txHashes, stateRoot)
+
+	if valid, err := h.validateTxsForL1(mempool); err != nil || !valid {
+		logger.Warn("L1 collect rejected: Core validation failed: %v", err)
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
+			"error": "L1 validation failed",
+			"detail": func() string {
+				if err != nil {
+					return err.Error()
+				}
+				return "invalid transactions"
+			}(),
+		})
+		return
+	}
+	// All committee logic lives in Core. Network load = max load among candidates (high load on any node → fewer validators).
 	loadPct := 0
 	for _, id := range candidates {
 		if n := h.nodeRegistry.Get(id); n != nil {
@@ -1511,7 +1614,7 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	numCandidates := len(candidates)
-	// Розмір комітету з Core: мін. 3 (при N≥3), далі від % від кількості нод. Не константа.
+	// Committee size from Core: min 3 (when N≥3), then scaled by node count percentage. Not a constant.
 	var committeeSize int
 	var selectionPercent int
 	var committeeList []string
@@ -1551,7 +1654,7 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 			if numCandidates > 0 {
 				selectionPercent = committeeSize * 100 / numCandidates
 			}
-			// Комітет = пропонер + (committeeSize-1) інших, щоб totalExpected = committeeSize завжди.
+			// Committee = proposer + (committeeSize-1) others so totalExpected always equals committeeSize.
 			others := make([]string, 0, numCandidates-1)
 			for _, id := range candidates {
 				if id != myId {
@@ -1619,7 +1722,7 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	for _, id := range committeeList {
 		committeeSet[id] = true
 	}
-	totalExpected := len(committeeSet) // завжди = committeeSize (пропонер + (size-1) інших)
+	totalExpected := len(committeeSet) // always = committeeSize (proposer + (size-1) others)
 	done := make(chan bool, 1)
 	round := &l1VoteRound{
 		blockId:       blockId,
@@ -1635,7 +1738,7 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	logger.Info("L1 committee: loadPct=%d selection%%=%d committee=%d (of %d)", loadPct, selectionPercent, totalExpected, len(candidates))
 
 	go h.nodesManager.BroadcastBlockchainEvent("l1_proposal", map[string]interface{}{
-		"blockId": blockId, "proposerNodeId": myId, "txCount": txCount,
+		"blockId": blockId, "proposerNodeId": myId, "txCount": txCount, "txHashes": stringSliceToInterface(txHashes),
 	}, myId)
 	go h.nodesManager.BroadcastBlockchainEvent("l1_vote", map[string]interface{}{
 		"blockId": blockId, "nodeId": myId, "yes": true,
@@ -1683,11 +1786,16 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 		voterIds = append(voterIds, shortId(id))
 	}
 	logger.Info("L1 round result totalExpected=%d need=%d yes=%d total_votes=%d accepted=%v voters=%v", totalExpected, need, yesCount, len(round.votes), ok, voterIds)
-	// Fallback: if no peer voted (old gateways or multi-node with no responses), accept with our vote only
-	if !ok && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
+
+	accepted, toPenalize := h.finalizeVoteRoundWithCore(round.votes, true, ok)
+	if !accepted && allowDegradedConsensus() && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
 		logger.Warn("L1 degraded: no peer votes (only proposer), accepting")
-		ok = true
+		accepted = true
+		toPenalize = nil
+	} else if !accepted && !allowDegradedConsensus() && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
+		logger.Warn("L1 strict mode: degraded accept disabled")
 	}
+	ok = accepted
 
 	h.l1VoteRoundMu.Lock()
 	h.l1VoteRound = nil
@@ -1700,6 +1808,7 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	}
 	h.lastL1Accepted = ok
 	h.updateVoteStatsFromRound(round.votes, ok, round.committee)
+	h.applyVoteSlashing(round.votes, toPenalize, round.committee)
 	h.lastL1VotesMu.Unlock()
 
 	// Broadcast vote result so all nodes (and any UI) see the same L1 votes
@@ -1728,13 +1837,16 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	for _, tx := range moved {
 		pendingBlockMaps = append(pendingBlockMaps, txToMap(tx))
 	}
-	eventData := map[string]interface{}{"txCount": len(moved), "l1BeneficiaryNodeId": myId, "pendingBlock": pendingBlockMaps}
+	eventData := map[string]interface{}{
+		"txCount": len(moved), "l1BeneficiaryNodeId": myId, "pendingBlock": pendingBlockMaps,
+		"txHashes": stringSliceToInterface(txHashesFromTransactions(moved)),
+	}
 	h.wsServer.BroadcastEvent("l1BlockCollected", map[string]interface{}{"txCount": len(moved), "l1BeneficiaryNodeId": myId})
 	go h.nodesManager.BroadcastBlockchainEvent("l1BlockCollected", eventData, myId)
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"moved":   len(moved),
-		"message": "L1 зібрав блок (67% так), TX у черзі на L2",
+		"message": "L1 collected block (67% yes), TX queued for L2",
 	})
 }
 
@@ -1802,9 +1914,15 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 	for _, n := range connected {
 		candidates = append(candidates, n.NodeID)
 	}
-	// blockId first for deterministic Core committee seed
-	blockId := "l2-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	// Навантаження мережі = max load серед кандидатів; різний load → різна кількість підтверджень.
+	// Deterministic blockId from pending block + state
+	blockNum := h.blockchain.NextBlockNumber()
+	stateRoot := ""
+	if ledger := h.blockchain.Ledger(); ledger != nil {
+		stateRoot, _ = ledger.StateRoot()
+	}
+	txHashes := txHashesFromTransactions(pending)
+	blockId := computeVoteBlockID("l2", blockNum, txHashes, stateRoot)
+	// Network load = max load among candidates; different load → different confirmation count.
 	loadPct := 0
 	for _, id := range candidates {
 		if n := h.nodeRegistry.Get(id); n != nil {
@@ -1937,7 +2055,7 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 	logger.Info("L2 committee: loadPct=%d selection%%=%d committee=%d (of %d)", loadPct, selectionPercent, totalExpected, len(candidates))
 
 	go h.nodesManager.BroadcastBlockchainEvent("l2_proposal", map[string]interface{}{
-		"blockId": blockId, "proposerNodeId": myId,
+		"blockId": blockId, "proposerNodeId": myId, "txHashes": stringSliceToInterface(txHashes),
 	}, myId)
 	go h.nodesManager.BroadcastBlockchainEvent("l2_vote", map[string]interface{}{
 		"blockId": blockId, "nodeId": myId, "yes": true,
@@ -1985,11 +2103,16 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		voterIdsL2 = append(voterIdsL2, shortId(id))
 	}
 	logger.Info("L2 round result totalExpected=%d need=%d yes=%d total_votes=%d accepted=%v voters=%v", totalExpected, needL2, yesCountL2, len(round.votes), ok, voterIdsL2)
-	// Fallback: if no peer voted, accept with proposer vote only (degraded mode)
-	if !ok && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
+
+	acceptedL2, toPenalizeL2 := h.finalizeVoteRoundWithCore(round.votes, false, ok)
+	if !acceptedL2 && allowDegradedConsensus() && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
 		logger.Warn("L2 degraded: no peer votes (only confirmer), accepting")
-		ok = true
+		acceptedL2 = true
+		toPenalizeL2 = nil
+	} else if !acceptedL2 && !allowDegradedConsensus() && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
+		logger.Warn("L2 strict mode: degraded accept disabled")
 	}
+	ok = acceptedL2
 
 	h.l2VoteRoundMu.Lock()
 	h.l2VoteRound = nil
@@ -2002,6 +2125,7 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 	}
 	h.lastL2Accepted = ok
 	h.updateVoteStatsFromRound(round.votes, ok, round.committee)
+	h.applyVoteSlashing(round.votes, toPenalizeL2, round.committee)
 	h.lastL1VotesMu.Unlock()
 
 	// Broadcast vote result so all nodes (and any UI) see the same L2 votes
@@ -2041,7 +2165,22 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	moved, block := h.blockchain.L2ConfirmBlock()
+	moved, block, err := h.blockchain.L2ConfirmBlock()
+	if err != nil {
+		logger.Warn("L2 confirm apply failed: %v", err)
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if header, hdrErr := h.assembleBlockHeader(block.BlockNumber, moved, myId, block.Timestamp); hdrErr == nil {
+		h.blockchain.ApplyBlockHeader(block.BlockNumber, *header, myId)
+		block.BlockHash = header.BlockHash
+		block.MerkleRoot = header.MerkleRoot
+		block.StateRoot = header.StateRoot
+		block.PreviousHash = header.PreviousHash
+		block.ProducerNodeID = myId
+	} else {
+		logger.Warn("assemble-block failed after L2 confirm: %v", hdrErr)
+	}
 	logger.Info("L2 block confirmed confirmer=%s blockNumber=%d moved=%d totalFees=%d", shortId(myId), block.BlockNumber, len(moved), block.TotalFees)
 	if block.TotalFees > 0 {
 		cfg := h.distributor.GetConfig()
@@ -2126,6 +2265,11 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		"txCount":               block.TxCount,
 		"totalFees":             block.TotalFees,
 		"transactions":          txMaps,
+		"blockHash":             block.BlockHash,
+		"merkleRoot":            block.MerkleRoot,
+		"stateRoot":             block.StateRoot,
+		"previousHash":          block.PreviousHash,
+		"producerNodeId":        block.ProducerNodeID,
 		"l1Yes":                 l1YesResp,
 		"l1No":                  l1NoResp,
 		"l2Yes":                 l2YesResp,
@@ -2145,7 +2289,7 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		"l1No":    l1NoResp,
 		"l2Yes":   l2YesResp,
 		"l2No":    l2NoResp,
-		"message": "L2 підтвердив блок (70% так), TX у ланцюгу",
+		"message": "L2 confirmed block (70% yes), TX on chain",
 	})
 }
 
@@ -2155,7 +2299,19 @@ func (h *Handler) ConfirmBlock(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
 		return
 	}
-	moved, block := h.blockchain.ConfirmMempoolToChain()
+	moved, block, err := h.blockchain.ConfirmMempoolToChain()
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	myId := h.nodesManager.GetNodeID()
+	if header, hdrErr := h.assembleBlockHeader(block.BlockNumber, moved, myId, block.Timestamp); hdrErr == nil {
+		h.blockchain.ApplyBlockHeader(block.BlockNumber, *header, myId)
+		block.BlockHash = header.BlockHash
+		block.MerkleRoot = header.MerkleRoot
+		block.StateRoot = header.StateRoot
+		block.PreviousHash = header.PreviousHash
+	}
 	if block.TotalFees > 0 {
 		h.distributor.ApplyBlock(block.TotalFees)
 	}
@@ -2174,7 +2330,7 @@ func (h *Handler) ConfirmBlock(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"block":   block,
 		"moved":   len(moved),
-		"message": "Блок підтверджено, TX у ланцюгу",
+		"message": "Block confirmed, TX on chain",
 	})
 }
 
@@ -2266,8 +2422,8 @@ func (h *Handler) GetFeeDistribution(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// TestSetLoad sets load for a node (тест навантаження мережі). POST body: { "nodeId": "optional", "currentTasks": 2, "maxCapacity": 10 }.
-// Якщо nodeId не вказано - встановлюється для поточної ноди. Впливає на SelectionWeight = репутація×(1−load) (Core).
+// TestSetLoad sets load for a node (network load test). POST body: { "nodeId": "optional", "currentTasks": 2, "maxCapacity": 10 }.
+// If nodeId is omitted, applies to the current node. Affects SelectionWeight = reputation×(1−load) (Core).
 func (h *Handler) TestSetLoad(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
@@ -2288,7 +2444,7 @@ func (h *Handler) TestSetLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	h.nodeRegistry.EnsureNode(nodeID, 0, 1)
 	h.nodeRegistry.SetLoad(nodeID, body.CurrentTasks, body.MaxCapacity)
-	// Розсилаємо load пірам - щоб розмір комітету залежав від навантаження мережі (max load серед кандидатів).
+	// Broadcast load to peers so committee size depends on network load (max load among candidates).
 	go h.nodesManager.BroadcastBlockchainEvent("node_load", map[string]interface{}{
 		"nodeId": nodeID, "currentTasks": body.CurrentTasks, "maxCapacity": body.MaxCapacity,
 	}, h.nodesManager.GetNodeID())
@@ -2304,7 +2460,7 @@ func (h *Handler) TestSetLoad(w http.ResponseWriter, r *http.Request) {
 		"maxCapacity":   n.MaxCapacity,
 		"loadScore":     n.LoadScore,
 		"selectionWeight": n.SelectionWeight(),
-		"message":       "Навантаження встановлено (вага вибору = репутація×(1−load))",
+		"message":       "Load set (selection weight = reputation×(1−load))",
 	})
 }
 

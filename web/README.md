@@ -19,22 +19,22 @@ http://localhost:1812/
 The monitoring interface displays:
 
 1. **Component Status** - Real-time status of all system components:
-   - REST API
-   - WebSocket Server
-   - P2P Connections
-   - Balance System
-   - Transactions Module
+ - REST API
+ - WebSocket Server
+ - P2P Connections
+ - Balance System
+ - Transactions Module
 
 2. **Network Information**:
-   - Network name
-   - Node ID
-   - Node Address
-   - Connected Peers count
+ - Network name
+ - Node ID
+ - Node Address
+ - Connected Peers count
 
 3. **Connected Clients & Peers**:
-   - Total connected clients
-   - Total connected peers
-   - Detailed socket list with IP addresses and connection times
+ - Total connected clients
+ - Total connected peers
+ - Detailed socket list with IP addresses and connection times
 
 ## API Endpoints Used
 
@@ -45,3 +45,6 @@ The monitoring interface displays:
 
 The interface automatically refreshes every 10 seconds to show the latest status.
 
+---
+
+Built with ❤️ by the Platarium team

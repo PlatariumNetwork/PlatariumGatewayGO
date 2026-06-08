@@ -13,15 +13,34 @@ import (
 // The Gateway (Go) is the only component that connects to Core; clients and peers never talk to Core directly.
 type RustCore struct {
 	binaryPath string
+	rpcClient  *RPCClient
 }
 
 // NewRustCore creates a new RustCore instance (Gateway connects to Core; Core is used only via this package).
+// Mode: PLATARIUM_CORE_MODE=cli (default, subprocess) or rpc (JSON-RPC daemon via PLATARIUM_CORE_RPC_ADDR).
 // Binary resolution order: PLATARIUM_CLI_PATH env, then ../PlatariumCore/target/release/platarium-cli, then PATH.
 func NewRustCore() (*RustCore, error) {
+	rc := &RustCore{}
+
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("PLATARIUM_CORE_MODE")))
+	if mode == "rpc" {
+		addr := os.Getenv("PLATARIUM_CORE_RPC_ADDR")
+		if addr == "" {
+			addr = "127.0.0.1:19500"
+		}
+		client, err := NewRPCClient(addr)
+		if err != nil {
+			return nil, err
+		}
+		rc.rpcClient = client
+		return rc, nil
+	}
+
 	// 1) Explicit path from environment (for testnet and CI)
 	if path := os.Getenv("PLATARIUM_CLI_PATH"); path != "" {
 		if _, err := os.Stat(path); err == nil {
-			return &RustCore{binaryPath: path}, nil
+			rc.binaryPath = path
+			return rc, nil
 		}
 	}
 
@@ -30,16 +49,19 @@ func NewRustCore() (*RustCore, error) {
 	absPath, err := filepath.Abs(binaryPath)
 	if err == nil {
 		if _, err := os.Stat(absPath); err == nil {
-			return &RustCore{binaryPath: absPath}, nil
+			rc.binaryPath = absPath
+			return rc, nil
 		}
 	}
 	if _, err := os.Stat(binaryPath); err == nil {
-		return &RustCore{binaryPath: binaryPath}, nil
+		rc.binaryPath = binaryPath
+		return rc, nil
 	}
 
 	// 3) System PATH
 	if path, err := exec.LookPath("platarium-cli"); err == nil {
-		return &RustCore{binaryPath: path}, nil
+		rc.binaryPath = path
+		return rc, nil
 	}
 
 	return nil, fmt.Errorf("platarium-cli binary not found. Set PLATARIUM_CLI_PATH or build: cd PlatariumCore && cargo build --release")
@@ -64,8 +86,11 @@ func normalizeSignatureHex(signatureHex string) string {
 	return signatureHex
 }
 
-// Execute runs a platarium-cli command
+// Execute runs a platarium-cli command (subprocess) or JSON-RPC call when PLATARIUM_CORE_MODE=rpc.
 func (rc *RustCore) Execute(args []string) (string, error) {
+	if rc.rpcClient != nil {
+		return rc.rpcClient.ExecuteRPC(args)
+	}
 	cmd := exec.Command(rc.binaryPath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -261,6 +286,71 @@ func (rc *RustCore) SignMessage(message interface{}, mnemonic, alphanumeric stri
 	}
 	
 	return result, nil
+}
+
+// StateInit initializes an empty Core state file.
+func (rc *RustCore) StateInit(stateFile string) (string, error) {
+	return rc.Execute([]string{"state-init", "--state-file", stateFile})
+}
+
+// StateQuery queries balance, uplp, and nonce from Core state file.
+func (rc *RustCore) StateQuery(stateFile, address, asset string) (string, error) {
+	if asset == "" {
+		asset = "PLP"
+	}
+	return rc.Execute([]string{
+		"state-query",
+		"--state-file", stateFile,
+		"--address", address,
+		"--asset", asset,
+	})
+}
+
+// StateValidateTx validates a transaction against Core state without applying.
+func (rc *RustCore) StateValidateTx(stateFile, txJSON string) (bool, error) {
+	output, execErr := rc.Execute([]string{"state-validate-tx", "--state-file", stateFile, "--tx", txJSON})
+	if execErr != nil {
+		return false, execErr
+	}
+	var out struct {
+		Valid bool   `json:"valid"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(output), &out); err != nil {
+		return false, fmt.Errorf("parse state-validate-tx output: %w", err)
+	}
+	if !out.Valid {
+		if out.Error != "" {
+			return false, fmt.Errorf("%s", out.Error)
+		}
+		return false, fmt.Errorf("invalid transaction")
+	}
+	return true, nil
+}
+
+// StateApplyTx applies a transaction to Core state file.
+func (rc *RustCore) StateApplyTx(stateFile, txJSON string) (string, error) {
+	return rc.Execute([]string{"state-apply-tx", "--state-file", stateFile, "--tx", txJSON})
+}
+
+// StateCredit credits PLP and μPLP to an address (testnet only).
+func (rc *RustCore) StateCredit(stateFile, address string, plp, uplp uint64, testnet bool) (string, error) {
+	args := []string{
+		"state-credit",
+		"--state-file", stateFile,
+		"--address", address,
+		"--plp", fmt.Sprintf("%d", plp),
+		"--uplp", fmt.Sprintf("%d", uplp),
+	}
+	if testnet {
+		args = append(args, "--testnet")
+	}
+	return rc.Execute(args)
+}
+
+// StateRoot returns the deterministic state root from Core state file.
+func (rc *RustCore) StateRoot(stateFile string) (string, error) {
+	return rc.Execute([]string{"state-root", "--state-file", stateFile})
 }
 
 // ValidateTransaction runs Core validate-tx on a transaction JSON (Core format: hash, from, to, asset, amount, fee_uplp, nonce, reads, writes, sig_main, sig_derived).

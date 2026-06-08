@@ -1,6 +1,6 @@
 # PlatariumGateway (Go Version)
 
-Gateway for blockchain integration via REST API and WebSocket in the Platarium network.  
+Gateway for blockchain integration via REST API and WebSocket in the Platarium network. 
 Full implementation in Go with P2P synchronization support between nodes.
 
 ## Architecture: Go as mediator, connection to Core
@@ -69,7 +69,52 @@ To run a **test network** that validates every transaction with **Platarium Core
 In testnet mode:
 - Every submitted transaction **must** include a valid **signature** and **pubkey** (or **from** as public key).
 - The gateway calls `platarium-cli verify-signature` to validate; invalid or missing signature returns `400 Bad Request`.
+- **Balances and nonces** come from **Platarium Core state file** (not in-memory Go maps). Mempool admission uses `state-validate-tx`; L2 confirmation applies via `state-apply-tx`.
 - This verifies that transactions are validated correctly by the Core before being accepted and distributed.
+
+### Core state file
+
+The gateway persists authoritative balances in a JSON state file managed by `platarium-cli`:
+
+| Setting | Description |
+|---------|-------------|
+| `-state-file PATH` | CLI flag; sets `PLATARIUM_STATE_FILE` for this process |
+| `PLATARIUM_STATE_FILE` | Path to Core state JSON (default: `data/core-state.json`) |
+| `PLATARIUM_CHAIN_FILE` | Path to chain history JSON (default: derived from state file, e.g. `state-node0.json` → `chain-node0.json`) |
+| `PLATARIUM_CLI_PATH` | Path to `platarium-cli` binary (auto-detected from `../PlatariumCore/target/release/`) |
+
+Example (single-node testnet with isolated state):
+
+```bash
+export PLATARIUM_CLI_PATH=../PlatariumCore/target/release/platarium-cli
+export PLATARIUM_STATE_FILE=/tmp/gateway-state.json
+
+./platarium-gateway -testnet -state-file /tmp/gateway-state.json -port 2812 -ws 2813
+```
+
+Compare gateway balance with Core CLI:
+
+```bash
+curl http://127.0.0.1:2812/pg-bal/PxAlice
+platarium-cli state-query --state-file /tmp/gateway-state.json --address PxAlice
+```
+
+If Core CLI or state file is unavailable, balance/faucet endpoints return **503 Service Unavailable** (no Go fallback ledger).
+
+### Consensus
+
+| Setting | Description |
+|---------|-------------|
+| `PLATARIUM_ALLOW_DEGRADED_CONSENSUS` | `true` (default): accept L1/L2 with proposer-only vote when peers do not respond. Set `false` for strict multi-node mode. |
+| Slashing | After each L1/L2 round, Core `to_penalize` nodes get `AgainstMajority` slash; committee no-shows get `NoVote` slash. Suspended nodes are excluded from future committees. |
+
+### Persistence & sync
+
+| Setting | Description |
+|---------|-------------|
+| `PLATARIUM_CHAIN_FILE` | JSON file for confirmed blocks + transaction index (auto-derived from state file if unset) |
+| `-chain-file PATH` | CLI flag; sets `PLATARIUM_CHAIN_FILE` |
+| Peer sync | On connect, nodes exchange `sync:request` / `sync:response` with block payloads (same shape as `block_confirmed`) |
 
 **Run the full test suite (Core unit tests + optional integration tests):**
 
@@ -82,9 +127,9 @@ chmod +x PlatariumGatewayGO/scripts/run_testnet.sh
 Or manually:
 ```bash
 cd PlatariumGatewayGO
-go test -v ./internal/core/...          # Unit tests (sign/verify with Core)
-./platarium-gateway -testnet -port 2812 -ws 2813 &   # Start testnet
-go test -tags=integration -v -run TestTestnet .      # Integration tests (send TX)
+go test -v ./internal/core/... # Unit tests (sign/verify with Core)
+./platarium-gateway -testnet -port 2812 -ws 2813 & # Start testnet
+go test -tags=integration -v -run TestTestnet . # Integration tests (send TX)
 ```
 
 ### 100 RPC nodes + confirmation distribution test (two terminals)
@@ -193,11 +238,11 @@ Create or edit `peers.json`:
 
 ```json
 {
-  "peers": [
-    "ws://localhost:1813",
-    "ws://localhost:1823",
-    "ws://192.168.0.15:1813"
-  ]
+ "peers": [
+ "ws://localhost:1813",
+ "ws://localhost:1823",
+ "ws://192.168.0.15:1813"
+ ]
 }
 ```
 
@@ -213,6 +258,8 @@ export NODE_HOST=192.168.0.14
 
 - `--port <number>`: REST API port (default: 1812)
 - `--ws <number>`: WebSocket server port (default: 1813)
+- `-testnet`: Enable testnet mode (Core signature validation + state file ledger)
+- `-state-file <path>`: Core state JSON path (default: `PLATARIUM_STATE_FILE` env or `data/core-state.json`)
 
 ## REST API Endpoints
 
@@ -223,10 +270,10 @@ Health check and basic node information.
 **Response:**
 ```json
 {
-  "message": "PlatariumGateway v1.0.0 is running (Go)",
-  "nodeId": "072bd62f-7473-446f-a490-73dabd70b66a",
-  "nodeAddress": "ws://192.168.0.134:1813",
-  "connectedPeers": 3
+ "message": "PlatariumGateway v1.0.0 is running (Go)",
+ "nodeId": "072bd62f-7473-446f-a490-73dabd70b66a",
+ "nodeAddress": "ws://192.168.0.134:1813",
+ "connectedPeers": 3
 }
 ```
 
@@ -237,16 +284,16 @@ Full network status including all connected peer nodes.
 **Response:**
 ```json
 {
-  "nodeId": "072bd62f-7473-446f-a490-73dabd70b66a",
-  "nodeAddress": "ws://192.168.0.134:1813",
-  "connectedNodes": [
-    {
-      "nodeId": "a1b2c3d4-5678-90ab-cdef-123456789abc",
-      "address": "ws://192.168.0.135:1813",
-      "host": "192.168.0.135",
-      "port": 1813
-    }
-  ]
+ "nodeId": "072bd62f-7473-446f-a490-73dabd70b66a",
+ "nodeAddress": "ws://192.168.0.134:1813",
+ "connectedNodes": [
+ {
+ "nodeId": "a1b2c3d4-5678-90ab-cdef-123456789abc",
+ "address": "ws://192.168.0.135:1813",
+ "host": "192.168.0.135",
+ "port": 1813
+ }
+ ]
 }
 ```
 
@@ -257,26 +304,26 @@ Complete overview of all connected WebSocket clients across the entire network.
 **Response:**
 ```json
 {
-  "nodeId": "072bd62f-7473-446f-a490-73dabd70b66a",
-  "nodeAddress": "ws://192.168.0.134:1813",
-  "connectedSockets": [
-    {
-      "socketId": "51rahc7PzglDvO7WAAAB",
-      "ipAddress": "::ffff:127.0.0.1",
-      "connectedAt": "2025-11-01T14:22:33.511Z",
-      "nodeId": "072bd62f-7473-446f-a490-73dabd70b66a"
-    }
-  ],
-  "summary": {
-    "connectedClients": 3,
-    "connectedPeers": 2
-  }
+ "nodeId": "072bd62f-7473-446f-a490-73dabd70b66a",
+ "nodeAddress": "ws://192.168.0.134:1813",
+ "connectedSockets": [
+ {
+ "socketId": "51rahc7PzglDvO7WAAAB",
+ "ipAddress": "::ffff:127.0.0.1",
+ "connectedAt": "2025-11-01T14:22:33.511Z",
+ "nodeId": "072bd62f-7473-446f-a490-73dabd70b66a"
+ }
+ ],
+ "summary": {
+ "connectedClients": 3,
+ "connectedPeers": 2
+ }
 }
 ```
 
 ### `GET /pg-bal/{address}`
 
-Get balance of an address.
+Get balance, nonce, and μPLP balance from Core state file. Returns **503** if Core ledger is unavailable.
 
 ### `GET /pg-tx/{hash}`
 
@@ -316,20 +363,20 @@ The server logs important events with structured prefixes:
 ### Test Multi-Node Setup
 
 1. **Start Node 1:**
-   ```bash
-   ./platarium-gateway --port 1812 --ws 1813
-   ```
+ ```bash
+ ./platarium-gateway --port 1812 --ws 1813
+ ```
 
 2. **Start Node 2** (in another terminal):
-   ```bash
-   # Update peers.json to include Node 1
-   ./platarium-gateway --port 1822 --ws 1823
-   ```
+ ```bash
+ # Update peers.json to include Node 1
+ ./platarium-gateway --port 1822 --ws 1823
+ ```
 
 3. **Verify Connection:**
-   - Check logs for: `[NODE] Connected: ...`
-   - Call `GET http://localhost:1812/network` - should show Node 2
-   - Call `GET http://localhost:1822/network` - should show Node 1
+ - Check logs for: `[NODE] Connected: ...`
+ - Call `GET http://localhost:1812/network` - should show Node 2
+ - Call `GET http://localhost:1822/network` - should show Node 1
 
 ## Architecture
 
@@ -344,3 +391,7 @@ The server logs important events with structured prefixes:
 ## License
 
 MIT License © Platarium Network
+
+---
+
+Built with ❤️ by the Platarium team

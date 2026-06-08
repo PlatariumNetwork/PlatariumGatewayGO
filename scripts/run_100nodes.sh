@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Запуск 100 тестових RPC-нод (testnet) однією командою в одному консолі.
-# Вікно 1: запустити цей скрипт.
-# Вікно 2: запустити scripts/send_tx_load_test.sh для відправки транзакцій та статистики.
+# Start testnet RPC nodes (default 30) from a single console.
+# Terminal 1: run this script.
+# Terminal 2: run scripts/send_tx_load_test.sh to send transactions and show stats.
 #
 # Usage:
 #   cd PlatariumGatewayGO && chmod +x scripts/run_100nodes.sh && ./scripts/run_100nodes.sh
-# Тест лише з 1 нодою:  NODES=1 ./scripts/run_100nodes.sh
+# Single-node test: NODES=1 ./scripts/run_100nodes.sh
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,11 +16,11 @@ NODES=30
 BASE_REST=2812
 BASE_WS=2813
 
-# Щоб усі ноди могли відкрити достатньо сокетів (REST + WS + піри)
+# Allow each node enough file descriptors (REST + WS + peers)
 ulimit -n 2048 2>/dev/null || true
 
 export NODE_HOST="${NODE_HOST:-localhost}"
-# Затримка перед підключенням до peers: 2s щоб усі ноди встигли запуститися
+# Delay before connecting to peers so all nodes can start
 export PLATARIUM_PEER_CONNECT_DELAY_SEC="${PLATARIUM_PEER_CONNECT_DELAY_SEC:-2}"
 
 cd "$GATEWAY_DIR"
@@ -28,7 +28,7 @@ echo "=== Platarium Testnet: 100 RPC nodes ==="
 echo "Gateway: $GATEWAY_DIR"
 echo "Nodes:   $NODES (REST ports $BASE_REST..$((BASE_REST+10*(NODES-1))), WS $BASE_WS..$((BASE_WS+10*(NODES-1))))"
 
-# Збірка Core (потрібно для testnet)
+# Build Core (required for testnet)
 if [ -d "$CORE_DIR" ]; then
   echo "[1/3] Building Platarium Core (release)..."
   (cd "$CORE_DIR" && cargo build --release 2>/dev/null) || {
@@ -43,11 +43,11 @@ else
   exit 1
 fi
 
-# Збірка gateway
+# Build gateway
 echo "[2/3] Building gateway..."
 go build -o platarium-gateway . || { echo "ERROR: go build failed"; exit 1; }
 
-# Перевірка: усі потрібні порти вільні (REST і WS для кожної ноди)
+# Ensure all required ports are free (REST and WS per node)
 echo "Checking ports $BASE_REST..$((BASE_REST+10*(NODES-1))) and $BASE_WS..$((BASE_WS+10*(NODES-1)))..."
 for (( i=0; i<NODES; i++ )); do
   rest=$((BASE_REST+10*i))
@@ -68,10 +68,10 @@ for (( i=0; i<NODES; i++ )); do
 done
 echo "  All ports free."
 
-# Повна мережа (full mesh): нода $1 підключається до ВСІХ інших (0..NODES-1 крім себе).
-# Це потрібно, щоб L1/L2 голосування доходило до всіх: пропонент розсилає proposal пірам,
-# і кожна нода має бути піром пропонента, щоб відправити голос назад.
-# Ноди, що ще не запущені, підхоплюються через ConnectToNodeWithRetry (ретраї кожні 5с).
+# Full mesh: node $1 connects to ALL others (0..NODES-1 except self).
+# Required so L1/L2 votes reach everyone: proposer broadcasts proposal to peers,
+# and each node must be a peer of the proposer to send votes back.
+# Nodes not yet started are picked up via ConnectToNodeWithRetry (retries every 5s).
 build_peers() {
   local i=$1
   local j list=""
@@ -82,15 +82,15 @@ build_peers() {
   [ -z "$list" ] && echo "[]" || echo "[${list%,}]"
 }
 
-# Щоб було рівно 99 peers (без старих з peers.json) - тимчасово прибираємо peers.json
+# Temporarily rename peers.json so we get exactly N-1 peers (no stale entries)
 PEERS_JSON_BACKUP=""
 if [ -f "peers.json" ]; then
   mv peers.json peers.json.bak
   PEERS_JSON_BACKUP=1
-  echo "  (peers.json тимчасово перейменовано в peers.json.bak - буде відновлено при виході)"
+  echo "  (peers.json temporarily renamed to peers.json.bak - restored on exit)"
 fi
 
-# Логи кожної ноди в окремі файли (щоб бачити чому не стартує, якщо лише 1 працює)
+# Per-node log files (debug startup failures)
 mkdir -p "$GATEWAY_DIR/log"
 echo "[3/3] Starting $NODES nodes one by one (logs: log/node_N.log)..."
 pids=()
@@ -102,11 +102,11 @@ for (( i=0; i<NODES; i++ )); do
   logfile="$GATEWAY_DIR/log/node_${i}.log"
   ./platarium-gateway -testnet -port "$rest" -ws "$ws" >> "$logfile" 2>&1 &
   pids+=($!)
-  # Пауза щоб нода встигла забайндити порт перед стартом наступної (збільшено для стабільності)
+  # Pause so node binds port before starting the next (increased for stability)
   [ "$i" -lt $((NODES-1)) ] && sleep 0.8
 done
 
-# Чекаємо поки всі ноди забайндять порти + час на ConnectToPeers (full mesh: ретраї до інших нод кожні 5с)
+# Wait for all nodes to bind ports + time for ConnectToPeers (full mesh retries every 5s)
 BIND_WAIT="${BIND_WAIT:-10}"
 echo "Waiting for nodes to bind and connect to peers (${PLATARIUM_PEER_CONNECT_DELAY_SEC}s delay + ${BIND_WAIT}s)..."
 sleep $((PLATARIUM_PEER_CONNECT_DELAY_SEC + BIND_WAIT))
