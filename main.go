@@ -143,6 +143,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create handler: %v", err)
 	}
+	if handlers.AutoBlockEnabled(*testnet) {
+		l1Every, l2Every := handlers.AutoBlockIntervals()
+		handler.StartAutoBlockWorker(l1Every, l2Every)
+		log.Printf("[AUTO-BLOCK] Enabled: L1 collect every %v when mempool non-empty; L2 confirm every %v when pending block exists", l1Every, l2Every)
+	}
 
 	// Static file server for web UI
 	router.PathPrefix("/web/").Handler(http.StripPrefix("/web/", http.FileServer(http.Dir("./web/"))))
