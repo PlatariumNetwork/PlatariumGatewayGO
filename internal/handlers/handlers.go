@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1158,7 +1159,13 @@ func (h *Handler) SendTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Testnet: require Core and valid signature for every transaction
+	// Platarium Wallet / Core dual-signature format (sig_main + sig_derived).
+	if getString(txData, "sig_main") != "" {
+		h.submitCoreSignedTx(w, txData)
+		return
+	}
+
+	// Legacy single-signature path (sign-message CLI, older clients).
 	if h.testnet {
 		if h.rustCore == nil {
 			jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
@@ -1200,7 +1207,6 @@ func (h *Handler) SendTransaction(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("[TESTNET] Transaction signature verified by Core")
 	} else if h.rustCore != nil {
-		// Non-testnet: optional verification when signature is provided
 		signature, hasSig := txData["signature"].(string)
 		pubKey := getString(txData, "pubkey")
 		if pubKey == "" {
@@ -1221,8 +1227,7 @@ func (h *Handler) SendTransaction(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	
-	// Create transaction
+
 	tx := &blockchain.Transaction{
 		Hash:            generateHash(),
 		From:            getString(txData, "from"),
@@ -1235,23 +1240,21 @@ func (h *Handler) SendTransaction(w http.ResponseWriter, r *http.Request) {
 		AssetType:       getString(txData, "assetType"),
 		ContractAddress: getString(txData, "contractAddress"),
 	}
-	
+
 	if tx.Type == "" {
 		tx.Type = "transfer"
 	}
 	if tx.AssetType == "" {
 		tx.AssetType = "native"
 	}
-	
-	// Add transaction
+
 	if err := h.blockchain.AddTransaction(tx); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{
 			"error": err.Error(),
 		})
 		return
 	}
-	
-	// Broadcast transaction event
+
 	eventData := map[string]interface{}{
 		"hash":  tx.Hash,
 		"from":  tx.From,
@@ -1260,12 +1263,62 @@ func (h *Handler) SendTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 	h.wsServer.BroadcastEvent("transactionProcessed", eventData)
 	h.nodesManager.BroadcastBlockchainEvent("transactionProcessed", eventData, h.nodesManager.GetNodeID())
-	
-	response := map[string]interface{}{
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":     true,
 		"transaction": tx,
+	})
+}
+
+func (h *Handler) submitCoreSignedTx(w http.ResponseWriter, txData map[string]interface{}) {
+	if h.testnet && h.blockchain.Ledger() == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "Testnet requires Platarium Core; core unavailable",
+		})
+		return
 	}
-	jsonResponse(w, http.StatusOK, response)
+	tx := mapToTx(txData)
+	if tx == nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{
+			"error": "Invalid Core-signed transaction",
+		})
+		return
+	}
+	if tx.Timestamp == 0 {
+		tx.Timestamp = time.Now().Unix()
+	}
+	if tx.Type == "" {
+		tx.Type = "transfer"
+	}
+	if tx.AssetType == "" {
+		tx.AssetType = "native"
+	}
+	if tx.Asset == "" {
+		tx.Asset = "PLP"
+	}
+	if tx.Value == "" && tx.AmountUplp > 0 {
+		tx.Value = strconv.FormatUint(tx.AmountUplp, 10)
+	}
+	if tx.Fee == "" && tx.FeeUplp > 0 {
+		tx.Fee = strconv.FormatUint(tx.FeeUplp, 10)
+	}
+	if err := h.validateTxForMempool(tx); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := h.blockchain.AddToMempool(tx); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	h.wsServer.BroadcastEvent("mempoolUpdate", map[string]interface{}{"hash": tx.Hash, "from": tx.From, "to": tx.To, "value": tx.Value})
+	myId := h.nodesManager.GetNodeID()
+	go h.nodesManager.BroadcastBlockchainEvent("mempoolUpdate", map[string]interface{}{"hash": tx.Hash}, myId)
+	go h.nodesManager.BroadcastBlockchainEvent("mempool:add", map[string]interface{}{"tx": txToMap(tx)}, myId)
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":     true,
+		"transaction": tx,
+		"message":     "TX added to mempool",
+	})
 }
 
 func jsonResponse(w http.ResponseWriter, status int, data interface{}) {
@@ -1342,10 +1395,61 @@ func (h *Handler) GetMempool(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"mempool": txs, "count": len(txs)})
 }
 
-// GetAllTransactions returns all confirmed transactions
+// GetAllTransactions returns confirmed, pending, and mempool transactions for explorer indexing.
 func (h *Handler) GetAllTransactions(w http.ResponseWriter, r *http.Request) {
-	txs := h.blockchain.GetAllTransactions()
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"transactions": txs, "count": len(txs)})
+	items := h.buildExplorerTransactionList()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"transactions": items, "count": len(items)})
+}
+
+func (h *Handler) buildExplorerTransactionList() []map[string]interface{} {
+	blockByHash := h.blockchain.TxHashToBlockNumber()
+	seen := make(map[string]bool)
+	out := make([]map[string]interface{}, 0)
+
+	appendTx := func(tx *blockchain.Transaction) {
+		if tx == nil || tx.Hash == "" || seen[tx.Hash] {
+			return
+		}
+		seen[tx.Hash] = true
+		m := txToMap(tx)
+		if m == nil {
+			return
+		}
+		if tx.BlockNumber > 0 {
+			m["blockNumber"] = tx.BlockNumber
+		} else if bn, ok := blockByHash[tx.Hash]; ok {
+			m["blockNumber"] = bn
+		}
+		out = append(out, m)
+	}
+
+	for _, tx := range h.blockchain.GetAllTransactions() {
+		appendTx(tx)
+	}
+	for _, tx := range h.blockchain.GetPendingBlock() {
+		appendTx(tx)
+	}
+	for _, tx := range h.blockchain.GetMempool() {
+		appendTx(tx)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return txMapTimestamp(out[i]) > txMapTimestamp(out[j])
+	})
+	return out
+}
+
+func txMapTimestamp(m map[string]interface{}) int64 {
+	switch v := m["timestamp"].(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	default:
+		return 0
+	}
 }
 
 // GetBlockHistory returns block history for analytics
