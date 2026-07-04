@@ -9,11 +9,11 @@ Full implementation in Go with P2P synchronization support between nodes.
 
 - **Clients / network** → send requests and transactions to **Gateway (Go)**.
 - **Gateway (Go)** → the only component that **connects to Platarium Core** (Rust): it calls `platarium-cli` for signature verification, key generation, etc.
-- **Core (Rust)** — cryptography and protocol; it has no server of its own and is used only by the Gateway.
+- **Core (Rust)** - cryptography and protocol; it has no server of its own and is used only by the Gateway.
 
 In testnet mode the Gateway decides when to call Core to validate TX; clients simply submit TX to the REST/WS Gateway.
 
-**Decentralized network:** it does not matter which node receives a transaction — it enters the shared Mempool and is synchronized across nodes. Nodes take TX from the Mempool; the reputation-based protocol (selection weight) chooses L1 (block collection) and L2 (confirmation).
+**Decentralized network:** it does not matter which node receives a transaction - it enters the shared Mempool and is synchronized across nodes. Nodes take TX from the Mempool; the reputation-based protocol (selection weight) chooses L1 (block collection) and L2 (confirmation).
 
 ## Features
 

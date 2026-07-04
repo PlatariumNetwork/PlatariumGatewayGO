@@ -17,6 +17,7 @@ import (
 
 	"platarium-gateway-go/internal/blockchain"
 	"platarium-gateway-go/internal/core"
+	"platarium-gateway-go/internal/faucet"
 	"platarium-gateway-go/internal/logger"
 	"platarium-gateway-go/internal/nodes"
 	"platarium-gateway-go/internal/rating"
@@ -76,6 +77,9 @@ type Handler struct {
 	lastL1Accepted  bool
 	lastL2Votes     map[string]bool
 	lastL2Accepted  bool
+
+	faucetStore     *faucet.CooldownStore
+	faucetAmountPLP uint64
 }
 
 type l2VoteRound struct {
@@ -138,6 +142,13 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 	if bc.Ledger() != nil {
 		h.initChainPersistence(stateFile)
 	}
+	faucetStore, ferr := initFaucetCooldownStore()
+	if ferr != nil {
+		log.Printf("[WARN] Faucet cooldown store unavailable: %v", ferr)
+	} else {
+		h.faucetStore = faucetStore
+	}
+	h.faucetAmountPLP = faucetAmountFromEnv()
 	h.RegisterVoteCallbacks()
 	h.RegisterSyncCallbacks()
 	return h, nil
@@ -948,12 +959,14 @@ func (h *Handler) RestoreWallet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Faucet adds a faucet TX to mempool; balance is applied when block is confirmed (L1→L2). All nodes get consistent state.
-const FaucetAmountUplp = 1_000_000
-
+// Melancholy testnet faucet: instant 5000 PLP credit with 24h cooldown per address.
 func (h *Handler) Faucet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	if !h.testnet {
+		jsonResponse(w, http.StatusForbidden, map[string]string{"error": "faucet is only available on testnet"})
 		return
 	}
 	if h.blockchain.Ledger() == nil {
@@ -965,39 +978,153 @@ func (h *Handler) Faucet(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Address string `json:"address"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Address == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "body must include \"address\""})
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
 		return
 	}
-	tx := &blockchain.Transaction{
-		Hash:       generateHash(),
-		From:       blockchain.FaucetAddress,
-		To:         body.Address,
-		Value:      strconv.FormatUint(FaucetAmountUplp, 10),
-		Fee:        "0",
-		Nonce:      0,
-		Timestamp:  time.Now().Unix(),
-		Type:       "faucet",
-		AssetType:  "native",
-		AmountUplp: FaucetAmountUplp,
-		FeeUplp:    0,
+	address := strings.TrimSpace(body.Address)
+	if !isValidFaucetAddress(address) {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid Platarium address"})
+		return
 	}
-	if err := h.blockchain.AddToMempool(tx); err != nil {
+	now := time.Now()
+	if h.faucetStore != nil {
+		if wait := h.faucetStore.Remaining(address, now); wait > 0 {
+			hours, minutes, seconds, label := faucet.FormatWait(wait)
+			jsonResponse(w, http.StatusTooManyRequests, map[string]interface{}{
+				"error":             "cooldown",
+				"message":           fmt.Sprintf("You can request test PLP again in %s.", label),
+				"retryAfterSeconds": int(wait.Seconds()),
+				"hours":             hours,
+				"minutes":           minutes,
+				"seconds":           seconds,
+			})
+			return
+		}
+	}
+	amount := h.faucetAmountPLP
+	if amount == 0 {
+		amount = blockchain.MelancholyFaucetAmountPLP
+	}
+	tx, err := h.blockchain.InstantFaucetCredit(address, amount)
+	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	myId := h.nodesManager.GetNodeID()
-	h.wsServer.BroadcastEvent("mempoolUpdate", map[string]interface{}{"hash": tx.Hash, "from": tx.From, "to": tx.To, "value": tx.Value, "type": "faucet"})
-	go h.nodesManager.BroadcastBlockchainEvent("mempoolUpdate", map[string]interface{}{"hash": tx.Hash}, myId)
-	go h.nodesManager.BroadcastBlockchainEvent("mempool:add", map[string]interface{}{"tx": txToMap(tx)}, myId)
+	if h.faucetStore != nil {
+		if err := h.faucetStore.RecordClaim(address, now); err != nil {
+			logger.Warn("faucet cooldown record failed for %s: %v", address, err)
+		}
+	}
+	query, qerr := h.blockchain.GetAccountQuery(address)
+	balance := "0"
+	uplpBalance := "0"
+	if qerr == nil && query != nil {
+		balance = query.Balance
+		uplpBalance = query.UplpBalance
+	}
+	nextClaimAt := now.Add(24 * time.Hour).Unix()
+	if h.faucetStore != nil {
+		nextClaimAt = now.Add(h.faucetStoreRemainingDuration()).Unix()
+	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"success":  true,
-		"address":  body.Address,
-		"credited": FaucetAmountUplp,
-		"txHash":   tx.Hash,
-		"balance":  "0",
-		"message":  "Faucet TX added to mempool. Run L1→L2 (or wait for auto) to confirm the block and credit the balance.",
+		"success":         true,
+		"network":         faucetNetworkID(),
+		"address":         address,
+		"creditedPlP":     amount,
+		"txHash":          tx.Hash,
+		"balance":         balance,
+		"uplpBalance":     uplpBalance,
+		"nextClaimAt":     nextClaimAt,
+		"message":         fmt.Sprintf("Credited %d test PLP instantly. You can send PLP using normal wallet rules.", amount),
 	})
+}
+
+func (h *Handler) faucetStoreRemainingDuration() time.Duration {
+	if h.faucetStore != nil {
+		return h.faucetStore.Cooldown()
+	}
+	return faucetCooldownFromEnv()
+}
+
+// FaucetCooldown reports whether an address can claim and time until next claim.
+func (h *Handler) FaucetCooldown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
+		return
+	}
+	address := strings.TrimSpace(r.URL.Query().Get("address"))
+	if !isValidFaucetAddress(address) {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "query param \"address\" required"})
+		return
+	}
+	amount := h.faucetAmountPLP
+	if amount == 0 {
+		amount = blockchain.MelancholyFaucetAmountPLP
+	}
+	now := time.Now()
+	wait := time.Duration(0)
+	if h.faucetStore != nil {
+		wait = h.faucetStore.Remaining(address, now)
+	}
+	resp := map[string]interface{}{
+		"network":     faucetNetworkID(),
+		"address":     address,
+		"amountPlP":   amount,
+		"canClaim":    wait == 0,
+		"cooldownHours": int(faucetCooldownFromEnv().Hours()),
+	}
+	if wait > 0 {
+		hours, minutes, seconds, label := faucet.FormatWait(wait)
+		resp["retryAfterSeconds"] = int(wait.Seconds())
+		resp["hours"] = hours
+		resp["minutes"] = minutes
+		resp["seconds"] = seconds
+		resp["message"] = fmt.Sprintf("You can request test PLP again in %s.", label)
+		resp["nextClaimAt"] = now.Add(wait).Unix()
+	}
+	jsonResponse(w, http.StatusOK, resp)
+}
+
+func initFaucetCooldownStore() (*faucet.CooldownStore, error) {
+	path := os.Getenv("PLATARIUM_FAUCET_COOLDOWN_FILE")
+	if path == "" {
+		path = "data/faucet-cooldown.json"
+	}
+	return faucet.NewCooldownStore(path, faucetCooldownFromEnv())
+}
+
+func faucetCooldownFromEnv() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("PLATARIUM_FAUCET_COOLDOWN_HOURS")); v != "" {
+		if hours, err := strconv.Atoi(v); err == nil && hours > 0 {
+			return time.Duration(hours) * time.Hour
+		}
+	}
+	return 24 * time.Hour
+}
+
+func faucetAmountFromEnv() uint64 {
+	if v := strings.TrimSpace(os.Getenv("PLATARIUM_FAUCET_AMOUNT_PLP")); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return blockchain.MelancholyFaucetAmountPLP
+}
+
+func faucetNetworkID() string {
+	if id := strings.TrimSpace(os.Getenv("PLATARIUM_NETWORK_ID")); id != "" {
+		return id
+	}
+	return "melancholy-testnet"
+}
+
+func isValidFaucetAddress(address string) bool {
+	address = strings.TrimSpace(address)
+	if len(address) < 8 || len(address) > 128 {
+		return false
+	}
+	return strings.HasPrefix(address, "Px")
 }
 
 func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {

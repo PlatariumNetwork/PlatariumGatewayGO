@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prints commands to start 3 nodes in 3 separate terminals (real mode, multi-node L1/L2).
-# Does not build — instructions only.
+# Does not build - instructions only.
 #
 # Usage: ./scripts/run_3nodes.sh
 

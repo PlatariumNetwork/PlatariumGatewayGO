@@ -638,6 +638,42 @@ func parseAmount(tx *Transaction) uint64 {
 // FaucetAddress is the sender address for faucet transactions.
 const FaucetAddress = "faucet"
 
+// MelancholyFaucetAmountPLP is the default testnet faucet drip (whole PLP units).
+const MelancholyFaucetAmountPLP = 5000
+
+// InstantFaucetCredit applies testnet PLP directly via Core state-credit (no consensus).
+func (bc *Blockchain) InstantFaucetCredit(to string, plp uint64) (*Transaction, error) {
+	if plp == 0 {
+		return nil, fmt.Errorf("faucet amount must be positive")
+	}
+	bc.mu.RLock()
+	ledger := bc.ledger
+	bc.mu.RUnlock()
+	if ledger == nil {
+		return nil, fmt.Errorf("core ledger unavailable")
+	}
+	if err := ledger.Credit(to, plp, 0); err != nil {
+		return nil, err
+	}
+	tx := &Transaction{
+		Hash:       fmt.Sprintf("faucet-%d-%s", time.Now().UnixNano(), to),
+		From:       FaucetAddress,
+		To:         to,
+		Value:      strconv.FormatUint(plp, 10),
+		Fee:        "0",
+		Nonce:      0,
+		Timestamp:  time.Now().Unix(),
+		Type:       "faucet",
+		AssetType:  "native",
+		AmountUplp: plp,
+		FeeUplp:    0,
+	}
+	if err := bc.AddTransaction(tx); err != nil {
+		return tx, err
+	}
+	return tx, nil
+}
+
 const genesisPreviousHash = "0000000000000000000000000000000000000000000000000000000000000000"
 
 // GetPreviousBlockHash returns the hash of the last confirmed block, or genesis hash.
