@@ -9,11 +9,12 @@ import (
 
 // AccountQuery is the parsed state-query response from platarium-cli.
 type AccountQuery struct {
-	Address     string `json:"address"`
-	Asset       string `json:"asset"`
-	Balance     string `json:"balance"`
-	UplpBalance string `json:"uplp_balance"`
-	Nonce       uint64 `json:"nonce"`
+	Address           string `json:"address"`
+	Asset             string `json:"asset"`
+	Balance           string `json:"balance"`
+	UplpBalance       string `json:"uplp_balance"`
+	FeeSpendableUplp  string `json:"fee_spendable_uplp"`
+	Nonce             uint64 `json:"nonce"`
 }
 
 // ApplyTxResult is the parsed state-apply-tx response.

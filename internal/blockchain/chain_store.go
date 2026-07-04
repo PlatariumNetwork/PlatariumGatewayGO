@@ -85,6 +85,13 @@ func (bc *Blockchain) ChainFilePath() string {
 	return bc.chainFile
 }
 
+// PersistChainSnapshot writes indexed transactions and block history to disk.
+func (bc *Blockchain) PersistChainSnapshot() error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	return bc.persistChain()
+}
+
 // persistChain writes the chain snapshot when a chain file is configured.
 // Caller must hold bc.mu (write lock).
 func (bc *Blockchain) persistChain() error {

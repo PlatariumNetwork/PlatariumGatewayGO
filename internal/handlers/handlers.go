@@ -223,6 +223,19 @@ func (h *Handler) validateTxForMempool(tx *blockchain.Transaction) error {
 	return err
 }
 
+func (h *Handler) indexMempoolAdmission(tx *blockchain.Transaction) error {
+	if err := h.blockchain.AddToMempool(tx); err != nil {
+		return err
+	}
+	if err := h.blockchain.AddTransaction(tx); err != nil {
+		log.Printf("[mempool] tx index warning for %s: %v", tx.Hash, err)
+	}
+	if err := h.blockchain.PersistChainSnapshot(); err != nil {
+		log.Printf("[mempool] chain persist warning for %s: %v", tx.Hash, err)
+	}
+	return nil
+}
+
 func (h *Handler) onPendingBlockSync(pendingMaps []map[string]interface{}) {
 	txs := make([]*blockchain.Transaction, 0, len(pendingMaps))
 	for _, m := range pendingMaps {
@@ -883,10 +896,11 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"address":      address,
-		"balance":      account.Balance,
-		"nonce":        account.Nonce,
-		"uplp_balance": account.UplpBalance,
+		"address":            address,
+		"balance":            account.Balance,
+		"nonce":              account.Nonce,
+		"uplp_balance":       account.UplpBalance,
+		"fee_spendable_uplp": account.FeeSpendableUplp,
 	})
 }
 
@@ -1306,7 +1320,7 @@ func (h *Handler) submitCoreSignedTx(w http.ResponseWriter, txData map[string]in
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := h.blockchain.AddToMempool(tx); err != nil {
+	if err := h.indexMempoolAdmission(tx); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1674,7 +1688,7 @@ func (h *Handler) DemoSendTx(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := h.blockchain.AddToMempool(tx); err != nil {
+	if err := h.indexMempoolAdmission(tx); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
