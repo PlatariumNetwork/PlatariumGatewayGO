@@ -109,6 +109,7 @@ If Core CLI or state file is unavailable, balance/faucet endpoints return **503 
 | `PLATARIUM_AUTO_BLOCK` | `true` on testnet (default): background worker runs L1/L2 automatically. Set `false` to disable. |
 | `PLATARIUM_AUTO_BLOCK_L1_INTERVAL_SEC` | L1 collect interval when mempool is non-empty and no pending block (default: `5`) |
 | `PLATARIUM_AUTO_BLOCK_L2_INTERVAL_SEC` | L2 confirm interval when a pending block exists (default: `30`) |
+| `PLATARIUM_AUTO_BLOCK_L1_TX_LIMIT` | Max mempool txs per auto L1 tick (default: `1`; FIFO after prune) |
 | Slashing | After each L1/L2 round, Core `to_penalize` nodes get `AgainstMajority` slash; committee no-shows get `NoVote` slash. Suspended nodes are excluded from future committees. |
 
 ### Persistence & sync

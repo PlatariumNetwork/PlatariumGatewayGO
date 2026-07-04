@@ -56,6 +56,19 @@ func envPositiveInt(name string, defaultVal int) int {
 	return n
 }
 
+// autoBlockL1TxLimit returns how many mempool txs each auto L1 tick collects (default 1 on testnet).
+func autoBlockL1TxLimit() int {
+	return envPositiveInt("PLATARIUM_AUTO_BLOCK_L1_TX_LIMIT", 1)
+}
+
+func (h *Handler) pruneMempoolBeforeL1() int {
+	removed := h.blockchain.PruneMempool()
+	if removed > 0 {
+		logger.Info("Mempool pruned: removed=%d remaining=%d", removed, len(h.blockchain.GetMempool()))
+	}
+	return removed
+}
+
 // StartAutoBlockWorker runs periodic L1 collect (mempool → pending) and L2 confirm (pending → chain).
 func (h *Handler) StartAutoBlockWorker(l1Every, l2Every time.Duration) {
 	logger.Info("Auto block worker started: L1 every %v, L2 every %v", l1Every, l2Every)
@@ -87,12 +100,22 @@ func (h *Handler) autoL1Tick() {
 	}
 	defer h.autoBlockMu.Unlock()
 
-	mempool := len(h.blockchain.GetMempool())
-	logger.Info("Auto L1 tick: mempool=%d", mempool)
+	h.pruneMempoolBeforeL1()
+	mempool := h.blockchain.GetMempool()
+	if len(mempool) == 0 {
+		return
+	}
+
+	limit := autoBlockL1TxLimit()
+	logger.Info("Auto L1 tick: mempool=%d collectLimit=%d", len(mempool), limit)
 	w := &autoBlockResponseWriter{}
-	h.L1CollectBlock(w, autoBlockPOST())
+	h.l1CollectBlockRun(w, autoBlockPOST(), limit)
 	if w.status >= 400 && w.status != 0 {
 		logger.Warn("Auto L1 collect finished with HTTP %d", w.status)
+		if limit == 1 && len(mempool) > 0 {
+			h.blockchain.RemoveFromMempool([]string{mempool[0].Hash})
+			logger.Warn("Auto L1 dropped head mempool tx %s after failure", mempool[0].Hash)
+		}
 	}
 }
 
