@@ -333,15 +333,25 @@ func (bc *Blockchain) PendingBlockMatchesHashes(hashes []string) bool {
 
 // L1CollectBlock moves all mempool TX into pending block (L1 collected, awaiting L2)
 func (bc *Blockchain) L1CollectBlock() (moved []*Transaction) {
+	return bc.L1CollectBlockLimit(0)
+}
+
+// L1CollectBlockLimit moves up to limit mempool txs into pending (limit <= 0 = all).
+func (bc *Blockchain) L1CollectBlockLimit(limit int) (moved []*Transaction) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
-	moved = make([]*Transaction, 0, len(bc.mempool))
-	bc.pendingBlock = make([]*Transaction, 0, len(bc.mempool))
-	for _, tx := range bc.mempool {
+	n := len(bc.mempool)
+	if limit > 0 && limit < n {
+		n = limit
+	}
+	moved = make([]*Transaction, 0, n)
+	bc.pendingBlock = make([]*Transaction, 0, n)
+	for i := 0; i < n; i++ {
+		tx := bc.mempool[i]
 		bc.pendingBlock = append(bc.pendingBlock, tx)
 		moved = append(moved, tx)
 	}
-	bc.mempool = bc.mempool[:0]
+	bc.mempool = bc.mempool[n:]
 	return moved
 }
 

@@ -1774,7 +1774,7 @@ func (h *Handler) L1CollectBlock(w http.ResponseWriter, r *http.Request) {
 	// If we received a forward with ourselves as selected, we are the proposer - run L1 without re-selecting (stops chain).
 	if selectedHeader == myId {
 		logger.Info("L1 running as selected proposer (forwarded to us)")
-		h.l1CollectBlockRun(w, r)
+		h.l1CollectBlockRun(w, r, 0)
 		return
 	}
 	mempool := h.blockchain.GetMempool()
@@ -1806,11 +1806,13 @@ func (h *Handler) L1CollectBlock(w http.ResponseWriter, r *http.Request) {
 			logger.Warn("L1 selected %s but no RestURL, running locally", shortId(selected))
 		}
 	}
-	h.l1CollectBlockRun(w, r)
+	h.l1CollectBlockRun(w, r, 0)
 }
 
 // l1CollectBlockRun performs the L1 vote round and block collect (assumes mempool check already done or we are the selected node).
-func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
+// collectLimit <= 0 collects the full pruned mempool; otherwise only the first N txs (FIFO).
+func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request, collectLimit int) {
+	h.pruneMempoolBeforeL1()
 	mempool := h.blockchain.GetMempool()
 	txCount := len(mempool)
 	if txCount == 0 {
@@ -1821,6 +1823,11 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	collect := mempool
+	if collectLimit > 0 && collectLimit < len(mempool) {
+		collect = mempool[:collectLimit]
+	}
+	txCount = len(collect)
 	myId := h.nodesManager.GetNodeID()
 	connected := h.nodesManager.GetConnectedNodes()
 	candidates := make([]string, 0, 1+len(connected))
@@ -1834,10 +1841,10 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	if ledger := h.blockchain.Ledger(); ledger != nil {
 		stateRoot, _ = ledger.StateRoot()
 	}
-	txHashes := txHashesFromTransactions(mempool)
+	txHashes := txHashesFromTransactions(collect)
 	blockId := computeVoteBlockID("l1", blockNum, txHashes, stateRoot)
 
-	if valid, err := h.validateTxsForL1(mempool); err != nil || !valid {
+	if valid, err := h.validateTxsForL1(collect); err != nil || !valid {
 		logger.Warn("L1 collect rejected: Core validation failed: %v", err)
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"error": "L1 validation failed",
@@ -2078,7 +2085,7 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	h.pendingL1Mu.Lock()
 	h.pendingL1Beneficiary = myId
 	h.pendingL1Mu.Unlock()
-	moved := h.blockchain.L1CollectBlock()
+	moved := h.blockchain.L1CollectBlockLimit(collectLimit)
 	logger.Info("L1 block collected proposer=%s moved=%d", shortId(myId), len(moved))
 	pendingBlockMaps := make([]map[string]interface{}, 0, len(moved))
 	for _, tx := range moved {
