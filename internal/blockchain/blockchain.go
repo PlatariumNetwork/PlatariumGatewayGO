@@ -140,20 +140,47 @@ func (bc *Blockchain) GetTransaction(hash string) *Transaction {
 	return bc.transactions[hash]
 }
 
-// GetTransactionsByAddress returns all transactions for an address
+// GetTransactionsByAddress returns transactions where address is sender or receiver
+// (confirmed index, mempool, and pending block).
 func (bc *Blockchain) GetTransactionsByAddress(address string) []*Transaction {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	
-	txs, exists := bc.addressTxs[address]
-	if !exists {
-		return []*Transaction{}
+
+	seen := make(map[string]bool)
+	out := make([]*Transaction, 0)
+
+	appendMatch := func(tx *Transaction) {
+		if tx == nil || tx.Hash == "" || seen[tx.Hash] {
+			return
+		}
+		if tx.From != address && tx.To != address {
+			return
+		}
+		seen[tx.Hash] = true
+		out = append(out, tx)
 	}
-	
-	// Return a copy
-	result := make([]*Transaction, len(txs))
-	copy(result, txs)
-	return result
+
+	for _, tx := range bc.addressTxs[address] {
+		appendMatch(tx)
+	}
+	for _, tx := range bc.transactions {
+		appendMatch(tx)
+	}
+	for _, tx := range bc.pendingBlock {
+		appendMatch(tx)
+	}
+	for _, tx := range bc.mempool {
+		appendMatch(tx)
+	}
+
+	for i := 0; i < len(out); i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j].Timestamp > out[i].Timestamp {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
 }
 
 // AddTransaction adds a new transaction to the blockchain
