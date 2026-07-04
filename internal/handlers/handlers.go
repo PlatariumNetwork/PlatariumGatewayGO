@@ -81,6 +81,8 @@ type Handler struct {
 
 	faucetStore     *faucet.CooldownStore
 	faucetAmountPLP uint64
+
+	autoBlockMu sync.Mutex
 }
 
 type l2VoteRound struct {

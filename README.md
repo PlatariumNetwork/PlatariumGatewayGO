@@ -106,6 +106,9 @@ If Core CLI or state file is unavailable, balance/faucet endpoints return **503 
 | Setting | Description |
 |---------|-------------|
 | `PLATARIUM_ALLOW_DEGRADED_CONSENSUS` | `true` (default): accept L1/L2 with proposer-only vote when peers do not respond. Set `false` for strict multi-node mode. |
+| `PLATARIUM_AUTO_BLOCK` | `true` on testnet (default): background worker runs L1/L2 automatically. Set `false` to disable. |
+| `PLATARIUM_AUTO_BLOCK_L1_INTERVAL_SEC` | L1 collect interval when mempool is non-empty and no pending block (default: `5`) |
+| `PLATARIUM_AUTO_BLOCK_L2_INTERVAL_SEC` | L2 confirm interval when a pending block exists (default: `30`) |
 | Slashing | After each L1/L2 round, Core `to_penalize` nodes get `AgainstMajority` slash; committee no-shows get `NoVote` slash. Suspended nodes are excluded from future committees. |
 
 ### Persistence & sync
