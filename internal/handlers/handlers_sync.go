@@ -79,4 +79,22 @@ func (h *Handler) initChainPersistence(stateFile string) {
 	h.blockchain.SetChainFile(chainFile)
 	head := h.blockchain.HeadBlockNumber()
 	logger.Info("Chain loaded from %s (blocks=%d head=%d)", chainFile, len(h.blockchain.GetBlockHistory()), head)
+	h.rebuildDistributorTotalsFromChain()
+}
+
+func (h *Handler) rebuildDistributorTotalsFromChain() {
+	cfg := h.distributor.GetConfig()
+	var burned, treasury int64
+	for _, block := range h.blockchain.GetBlockHistory() {
+		if block.TotalFees <= 0 {
+			continue
+		}
+		sr := cfg.SplitBlockFees(block.TotalFees)
+		burned += sr.Burn
+		treasury += sr.Treasury
+	}
+	if burned > 0 || treasury > 0 {
+		h.distributor.SetTotals(burned, treasury)
+		logger.Info("Fee distribution totals rebuilt from chain: burned=%d treasury=%d (burn=%d%%)", burned, treasury, cfg.BurnPct)
+	}
 }

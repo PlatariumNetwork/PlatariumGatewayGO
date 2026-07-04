@@ -6,17 +6,12 @@ import (
 	"sync"
 )
 
-// Config holds reward distribution percentages (0-100). Sum should be 100.
+// Config holds protocol distribution percentages (0-100). Sum should be 100.
 type Config struct {
 	BurnPct     int `json:"burnPct"`
 	TreasuryPct int `json:"treasuryPct"`
 	L1Pct       int `json:"l1Pct"`
 	L2Pct       int `json:"l2Pct"`
-}
-
-// DefaultConfig: 0 burn, 20 treasury, 40 L1, 40 L2.
-func DefaultConfig() Config {
-	return Config{BurnPct: 0, TreasuryPct: 20, L1Pct: 40, L2Pct: 40}
 }
 
 // SplitResult is the result of splitting block fees.
@@ -53,7 +48,7 @@ type Distributor struct {
 }
 
 func NewDistributor() *Distributor {
-	return &Distributor{config: DefaultConfig()}
+	return &Distributor{config: ConfigFromEnv()}
 }
 
 func (d *Distributor) SetConfig(c Config) {
@@ -66,6 +61,20 @@ func (d *Distributor) GetConfig() Config {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.config
+}
+
+// SetTotals restores cumulative burn/treasury (e.g. after reloading chain history).
+func (d *Distributor) SetTotals(burned, treasury int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if burned < 0 {
+		burned = 0
+	}
+	if treasury < 0 {
+		treasury = 0
+	}
+	d.TotalBurned = burned
+	d.TotalTreasury = treasury
 }
 
 func (d *Distributor) ApplyBlock(totalFees int64) (l1Pool, l2Pool int64) {
