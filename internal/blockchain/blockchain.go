@@ -31,8 +31,9 @@ type Transaction struct {
 	Asset     string   `json:"asset,omitempty"`      // "PLP" or "Token:XXX"
 	AmountUplp uint64  `json:"amount,omitempty"`     // amount in minimal units
 	FeeUplp   uint64  `json:"fee_uplp,omitempty"`   // fee in μPLP
-	Reads     []string `json:"reads,omitempty"`
-	Writes    []string `json:"writes,omitempty"`
+	Reads       []string `json:"reads,omitempty"`
+	Writes      []string `json:"writes,omitempty"`
+	BlockNumber int64    `json:"blockNumber,omitempty"`
 }
 
 // BlockRecord is a record for analytics (block number from 0, time, tx count, fees, L1/L2 votes, duration, miners).
@@ -423,6 +424,7 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 		}
 		block.TotalFees += fee
 		bc.totalFeesCollected += fee
+		tx.BlockNumber = block.BlockNumber
 		bc.transactions[tx.Hash] = tx
 		bc.lastTx = tx
 		bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
@@ -475,6 +477,7 @@ func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block Block
 		fee := parseFee(tx.Fee)
 		block.TotalFees += fee
 		bc.totalFeesCollected += fee
+		tx.BlockNumber = block.BlockNumber
 		bc.transactions[tx.Hash] = tx
 		bc.lastTx = tx
 		bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
@@ -532,6 +535,7 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 		if fee == 0 && tx.FeeUplp > 0 {
 			fee = int64(tx.FeeUplp)
 		}
+		tx.BlockNumber = block.BlockNumber
 		bc.transactions[tx.Hash] = tx
 		bc.lastTx = tx
 		bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
@@ -565,7 +569,7 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 func (bc *Blockchain) GetAllTransactions() []*Transaction {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	
+
 	out := make([]*Transaction, 0, len(bc.transactions))
 	for _, tx := range bc.transactions {
 		out = append(out, tx)
@@ -575,6 +579,22 @@ func (bc *Blockchain) GetAllTransactions() []*Transaction {
 		for j := i + 1; j < len(out); j++ {
 			if out[j].Timestamp < out[i].Timestamp {
 				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
+// TxHashToBlockNumber maps confirmed transaction hashes to their block numbers.
+func (bc *Blockchain) TxHashToBlockNumber() map[string]int64 {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	out := make(map[string]int64)
+	for _, block := range bc.blockHistory {
+		for _, hash := range block.TxHashes {
+			if hash != "" {
+				out[hash] = block.BlockNumber
 			}
 		}
 	}
@@ -670,6 +690,12 @@ func (bc *Blockchain) InstantFaucetCredit(to string, plp uint64) (*Transaction, 
 	}
 	if err := bc.AddTransaction(tx); err != nil {
 		return tx, err
+	}
+	bc.mu.Lock()
+	persistErr := bc.persistChain()
+	bc.mu.Unlock()
+	if persistErr != nil {
+		return tx, persistErr
 	}
 	return tx, nil
 }
