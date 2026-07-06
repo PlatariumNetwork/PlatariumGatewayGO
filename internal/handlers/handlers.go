@@ -906,6 +906,34 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetAccounts returns accounts ranked by PLP balance (Etherscan-style top accounts).
+func (h *Handler) GetAccounts(w http.ResponseWriter, r *http.Request) {
+	if h.blockchain.Ledger() == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "Core ledger unavailable",
+		})
+		return
+	}
+	page := 1
+	limit := 25
+	if v := r.URL.Query().Get("page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			page = n
+		}
+	}
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	result, err := h.blockchain.ListTopAccounts(h.blockchain.Ledger().StateFilePath(), page, limit)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, result)
+}
+
 // GenerateWallet creates a new wallet via Core (mnemonic + alphanumeric + publicKey). For testnet/real flow.
 func (h *Handler) GenerateWallet(w http.ResponseWriter, r *http.Request) {
 	if h.rustCore == nil {
