@@ -413,9 +413,6 @@ func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) error {
 		if tx.From == FaucetAddress {
 			amt := parseAmount(tx)
 			uplp := tx.FeeUplp
-			if uplp == 0 {
-				uplp = 10_000
-			}
 			if err := ledger.Credit(tx.To, amt, uplp); err != nil {
 				return fmt.Errorf("faucet credit %s: %w", tx.Hash, err)
 			}

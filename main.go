@@ -174,6 +174,7 @@ func main() {
 	router.HandleFunc("/api/blocks", handler.GetBlockHistory).Methods("GET")
 	router.HandleFunc("/api/block/{blockNumber}", handler.GetBlock).Methods("GET")
 	router.HandleFunc("/api/stats", handler.GetStats).Methods("GET")
+	router.HandleFunc("/api/accounts", handler.GetAccounts).Methods("GET")
 	router.HandleFunc("/api/demo-sendtx", handler.DemoSendTx).Methods("POST")
 	router.HandleFunc("/api/confirm-block", handler.ConfirmBlock).Methods("POST")
 	router.HandleFunc("/api/pending-block", handler.GetPendingBlock).Methods("GET")
