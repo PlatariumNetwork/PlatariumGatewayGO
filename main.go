@@ -191,6 +191,9 @@ func main() {
 	router.HandleFunc("/api/faucet", handler.Faucet).Methods("POST")
 	router.HandleFunc("/api/faucet/cooldown", handler.FaucetCooldown).Methods("GET")
 	router.HandleFunc("/api/turn-ice", handler.WebRtcTurnIce).Methods("GET")
+	router.HandleFunc("/api/public-channels", handler.RegisterPublicChannel).Methods("POST")
+	router.HandleFunc("/api/public-channels", handler.ListPublicChannels).Methods("GET")
+	router.HandleFunc("/api/public-channels/{address}", handler.GetPublicChannel).Methods("GET")
 
 	// Serve index.html at root and /index.html (must be last to not interfere with other routes)
 	router.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {
