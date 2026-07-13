@@ -83,7 +83,8 @@ type Handler struct {
 	faucetStore     *faucet.CooldownStore
 	faucetAmountPLP uint64
 
-	publicChannels *publicchannel.Registry
+	publicChannels     *publicchannel.Registry
+	publicChannelPosts *publicchannel.PostStore
 
 	autoBlockMu sync.Mutex
 }
@@ -751,22 +752,32 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, response)
 }
 
+// defaultPublicStunIceServers is used when WEBRTC_ICE_SERVERS_JSON is unset (STUN only; TURN still required for strict NAT).
+func defaultPublicStunIceServers() []interface{} {
+	return []interface{}{
+		map[string]string{"urls": "stun:stun.l.google.com:19302"},
+		map[string]string{"urls": "stun:stun1.l.google.com:19302"},
+	}
+}
+
 // WebRtcTurnIce returns STUN/TURN list for WebRTC calls (same JSON shape as Platarium messenger Next.js /api/turn-ice).
 // Configure on the node: WEBRTC_ICE_SERVERS_JSON='[{"urls":"stun:..."},...]'
 func (h *Handler) WebRtcTurnIce(w http.ResponseWriter, r *http.Request) {
 	raw := strings.TrimSpace(os.Getenv("WEBRTC_ICE_SERVERS_JSON"))
 	if raw == "" {
-		jsonResponse(w, http.StatusOK, map[string]interface{}{"iceServers": []interface{}{}})
+		log.Printf("[turn-ice] WEBRTC_ICE_SERVERS_JSON unset - returning public STUN fallback (configure coturn TURN for cross-network calls)")
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"iceServers": defaultPublicStunIceServers()})
 		return
 	}
 	var ice []interface{}
 	if err := json.Unmarshal([]byte(raw), &ice); err != nil {
 		log.Printf("[turn-ice] invalid WEBRTC_ICE_SERVERS_JSON: %v", err)
-		jsonResponse(w, http.StatusOK, map[string]interface{}{"iceServers": []interface{}{}})
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"iceServers": defaultPublicStunIceServers()})
 		return
 	}
-	if ice == nil {
-		ice = []interface{}{}
+	if len(ice) == 0 {
+		log.Printf("[turn-ice] WEBRTC_ICE_SERVERS_JSON empty - returning public STUN fallback")
+		ice = defaultPublicStunIceServers()
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"iceServers": ice})
 }

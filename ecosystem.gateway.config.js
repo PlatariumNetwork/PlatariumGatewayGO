@@ -28,7 +28,10 @@ function requireEnv(name) {
 
 const gatewayDir = requireEnv("PLATARIUM_GATEWAY_CWD");
 const nodeHost = requireEnv("NODE_HOST");
-const iceJson = requireEnv("WEBRTC_ICE_SERVERS_JSON");
+const iceJson = env(
+  "WEBRTC_ICE_SERVERS_JSON",
+  '[{"urls":"stun:stun.l.google.com:19302"},{"urls":"stun:stun1.l.google.com:19302"}]',
+);
 const cliPath = env(
   "PLATARIUM_CLI_PATH",
   path.join(__dirname, "..", "PlatariumCore", "target", "release", "platarium-cli"),

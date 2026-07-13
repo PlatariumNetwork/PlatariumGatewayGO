@@ -25,6 +25,7 @@ In testnet mode the Gateway decides when to call Core to validate TX; clients si
 - **Global socket registry** - Track all connected clients across all nodes
 - Modular structure for easy extension
 - **Public channel registry** - messenger public feeds registered with owner wallet (`POST/GET /api/public-channels`)
+- **Public channel feed** - plaintext posts for registered channels (`POST/GET /api/public-channels/{address}/posts`)
 
 ## Requirements
 
