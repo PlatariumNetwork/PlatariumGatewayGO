@@ -21,6 +21,7 @@ import (
 	"platarium-gateway-go/internal/faucet"
 	"platarium-gateway-go/internal/logger"
 	"platarium-gateway-go/internal/nodes"
+	"platarium-gateway-go/internal/publicchannel"
 	"platarium-gateway-go/internal/rating"
 	"platarium-gateway-go/internal/rewards"
 	"platarium-gateway-go/internal/websocket"
@@ -81,6 +82,8 @@ type Handler struct {
 
 	faucetStore     *faucet.CooldownStore
 	faucetAmountPLP uint64
+
+	publicChannels *publicchannel.Registry
 
 	autoBlockMu sync.Mutex
 }
@@ -152,6 +155,7 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 		h.faucetStore = faucetStore
 	}
 	h.faucetAmountPLP = faucetAmountFromEnv()
+	ensurePublicChannelRegistry(h)
 	h.RegisterVoteCallbacks()
 	h.RegisterSyncCallbacks()
 	return h, nil
