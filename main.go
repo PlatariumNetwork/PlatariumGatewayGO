@@ -194,6 +194,8 @@ func main() {
 	router.HandleFunc("/api/public-channels", handler.RegisterPublicChannel).Methods("POST")
 	router.HandleFunc("/api/public-channels", handler.ListPublicChannels).Methods("GET")
 	router.HandleFunc("/api/public-channels/{address}", handler.GetPublicChannel).Methods("GET")
+	router.HandleFunc("/api/public-channels/{address}/posts", handler.AppendPublicChannelPost).Methods("POST")
+	router.HandleFunc("/api/public-channels/{address}/posts", handler.ListPublicChannelPosts).Methods("GET")
 
 	// Serve index.html at root and /index.html (must be last to not interfere with other routes)
 	router.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {

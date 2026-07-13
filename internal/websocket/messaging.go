@@ -7,18 +7,23 @@ import (
 
 // handleClientRegister handles client address registration
 func (s *Server) handleClientRegister(client *Client, data map[string]interface{}) {
-	address, ok := data["address"].(string)
-	if !ok || address == "" {
+	addressRaw, ok := data["address"].(string)
+	if !ok || addressRaw == "" {
 		log.Printf("[MESSAGE] Invalid address registration from client %s", client.ID)
 		return
 	}
+	address := normalizePlatariumAddress(addressRaw)
 
 	var announceAddr, announcePk string
 
 	s.mu.Lock()
 	// Remove old address mapping if exists
-	if client.Address != "" && client.Address != address {
-		delete(s.clientsByAddr, client.Address)
+	if client.Address != "" {
+		old := normalizePlatariumAddress(client.Address)
+		if old != address {
+			delete(s.clientsByAddr, old)
+			delete(s.clientsByAddr, client.Address)
+		}
 	}
 
 	// Update client address
@@ -30,6 +35,10 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 	}
 	// Take buffered offline messages (if any) for this address
 	pending := s.offlineMessages[address]
+	if len(pending) == 0 && addressRaw != address {
+		pending = s.offlineMessages[addressRaw]
+		delete(s.offlineMessages, addressRaw)
+	}
 	delete(s.offlineMessages, address)
 	s.mu.Unlock()
 
@@ -82,11 +91,11 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 
 // handleDirectMessage routes a message to the recipient by address
 func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}) {
-	to, _ := data["to"].(string)
+	toRaw, _ := data["to"].(string)
 	text, _ := data["text"].(string)
 	from := sender.Address
 
-	if to == "" || text == "" {
+	if toRaw == "" || text == "" {
 		log.Printf("[MESSAGE] Invalid message format from client %s", sender.ID)
 		sender.Conn.WriteJSON(map[string]interface{}{
 			"type": "messageError",
@@ -96,6 +105,8 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 		})
 		return
 	}
+
+	to := normalizePlatariumAddress(toRaw)
 
 	if from == "" {
 		log.Printf("[MESSAGE] Sender %s not registered", sender.ID)
@@ -205,13 +216,17 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 
 // handleE2eePubKeyRequest returns a peer's last registered X25519 public key (base64) for E2EE.
 func (s *Server) handleE2eePubKeyRequest(client *Client, data map[string]interface{}) {
-	ofAddress, _ := data["address"].(string)
+	ofAddressRaw, _ := data["address"].(string)
 	requestID, _ := data["requestId"].(string)
-	if ofAddress == "" || requestID == "" {
+	if ofAddressRaw == "" || requestID == "" {
 		return
 	}
+	ofAddress := normalizePlatariumAddress(ofAddressRaw)
 	s.mu.RLock()
 	pk := s.e2eePubKeys[ofAddress]
+	if pk == "" && ofAddressRaw != ofAddress {
+		pk = s.e2eePubKeys[ofAddressRaw]
+	}
 	s.mu.RUnlock()
 	payload := map[string]interface{}{
 		"address":   ofAddress,
@@ -248,12 +263,14 @@ func (s *Server) routeMessageToPeer(to, from, text string) {
 // HandleIncomingPeerMessage handles messages from peer nodes (called for eventType "message:route";
 // data is the event payload: from, to, text, timestamp - no "type" field).
 func (s *Server) HandleIncomingPeerMessage(data map[string]interface{}) {
-	to, _ := data["to"].(string)
-	from, _ := data["from"].(string)
+	toRaw, _ := data["to"].(string)
+	fromRaw, _ := data["from"].(string)
 	text, _ := data["text"].(string)
-	if to == "" || from == "" || text == "" {
+	if toRaw == "" || fromRaw == "" || text == "" {
 		return
 	}
+	to := normalizePlatariumAddress(toRaw)
+	from := normalizePlatariumAddress(fromRaw)
 
 	// Check if recipient is local
 	s.mu.RLock()

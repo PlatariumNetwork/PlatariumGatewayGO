@@ -1,0 +1,15 @@
+# Self-hosted STUN+TURN for Platarium messenger voice calls.
+#
+# 1. Edit turnserver.conf: external-ip, user/password
+# 2. docker compose up -d
+# 3. Set on gateway (one line JSON):
+#    WEBRTC_ICE_SERVERS_JSON=[{"urls":"stun:YOUR_PUBLIC_IPV4:3478"},{"urls":"turn:YOUR_PUBLIC_IPV4:3478?transport=udp","username":"platarium","credential":"CHANGE_ME_TURN_SECRET"},{"urls":"turns:YOUR_PUBLIC_IPV4:5349?transport=tcp","username":"platarium","credential":"CHANGE_ME_TURN_SECRET"}]
+# 4. Open UDP/TCP 3478, TCP 5349, UDP 49152-65535
+
+services:
+  coturn:
+    image: coturn/coturn:4.6.2
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
