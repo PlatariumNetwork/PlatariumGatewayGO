@@ -319,6 +319,17 @@ func (s *Server) HandleIncomingPeerMessage(data map[string]interface{}) {
 	}
 }
 
+// LookupE2eePubKey returns the last registered X25519 public key for an address (if any).
+func (s *Server) LookupE2eePubKey(address string) string {
+	norm := normalizePlatariumAddress(address)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if pk := s.e2eePubKeys[norm]; pk != "" {
+		return pk
+	}
+	return s.e2eePubKeys[address]
+}
+
 // broadcastE2eePubKeyAnnouncement notifies all connected messenger clients so senders can encrypt
 // without polling when a recipient registers their key on this gateway.
 func (s *Server) broadcastE2eePubKeyAnnouncement(addr, publicKey string) {
