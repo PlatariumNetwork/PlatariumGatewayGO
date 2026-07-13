@@ -17,6 +17,10 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 	var announceAddr, announcePk string
 
 	s.mu.Lock()
+	// Another tab may still hold this address; drop stale mapping so only this socket receives.
+	if existing, ok := s.clientsByAddr[address]; ok && existing != nil && existing.ID != client.ID {
+		existing.Address = ""
+	}
 	// Remove old address mapping if exists
 	if client.Address != "" {
 		old := normalizePlatariumAddress(client.Address)
@@ -119,14 +123,28 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 		return
 	}
 
-	// Find recipient by address
+	// Find recipient by address (normalized + raw fallback for legacy clients)
 	s.mu.RLock()
 	recipient, found := s.clientsByAddr[to]
+	if !found && toRaw != to {
+		recipient, found = s.clientsByAddr[toRaw]
+	}
 	s.mu.RUnlock()
+
+	writeMessageSent := func(delivered bool) {
+		sender.Conn.WriteJSON(map[string]interface{}{
+			"type": "messageSent",
+			"data": map[string]interface{}{
+				"to":        to,
+				"timestamp": time.Now().Unix(),
+				"delivered": delivered,
+			},
+		})
+	}
 
 	if !found {
 		// Recipient is offline on this node: buffer message for later delivery (up to 24h, see server.go TTL)
-		log.Printf("[MESSAGE] Recipient %s offline, buffering message", to)
+		log.Printf("[MESSAGE] Recipient %s offline on node, buffering (from %s)", to, from)
 		s.mu.Lock()
 		buf := s.offlineMessages[to]
 		now := time.Now().Unix()
@@ -149,13 +167,7 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 		}
 
 		// Acknowledge to sender that message is accepted for delivery (buffered)
-		sender.Conn.WriteJSON(map[string]interface{}{
-			"type": "messageSent",
-			"data": map[string]interface{}{
-				"to":        to,
-				"timestamp": time.Now().Unix(),
-			},
-		})
+		writeMessageSent(false)
 		return
 	}
 
@@ -192,26 +204,14 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 		}
 		s.offlineMessages[to] = buf
 		s.mu.Unlock()
-		sender.Conn.WriteJSON(map[string]interface{}{
-			"type": "messageSent",
-			"data": map[string]interface{}{
-				"to":        to,
-				"timestamp": now,
-			},
-		})
+		writeMessageSent(false)
 		return
 	}
 
 	log.Printf("[MESSAGE] Message delivered from %s to %s", from, to)
 
 	// Send delivery confirmation to sender
-	sender.Conn.WriteJSON(map[string]interface{}{
-		"type": "messageSent",
-		"data": map[string]interface{}{
-			"to":        to,
-			"timestamp": now,
-		},
-	})
+	writeMessageSent(true)
 }
 
 // handleE2eePubKeyRequest returns a peer's last registered X25519 public key (base64) for E2EE.
@@ -298,7 +298,15 @@ func (s *Server) HandleIncomingPeerMessage(data map[string]interface{}) {
 		// Recipient offline on this node as well: buffer for later when they come online here
 		log.Printf("[MESSAGE] Recipient %s offline on this node (peer route), buffering message", to)
 		s.mu.Lock()
-		ts, _ := data["timestamp"].(int64)
+		ts := int64(0)
+		switch v := data["timestamp"].(type) {
+		case int64:
+			ts = v
+		case float64:
+			ts = int64(v)
+		case int:
+			ts = int64(v)
+		}
 		if ts == 0 {
 			ts = time.Now().Unix()
 		}
