@@ -24,10 +24,11 @@ type NodeRewardReport struct {
 	Reason        string `json:"reason"`
 }
 
-// ReportNodeReward sends an approved XP credit to the Contributor Program API.
-func ReportNodeReward(apiBase, secret string, report NodeRewardReport) error {
-	if apiBase == "" || secret == "" {
-		return fmt.Errorf("contributors API URL or secret not configured")
+// ReportNodeReward sends a validation XP credit to the public Contributor Program API.
+// No shared secret — any operator node may report; Scan enforces floor/cap and idempotency.
+func ReportNodeReward(apiBase string, report NodeRewardReport) error {
+	if apiBase == "" {
+		return fmt.Errorf("contributors API URL not configured")
 	}
 	body, err := json.Marshal(report)
 	if err != nil {
@@ -39,8 +40,7 @@ func ReportNodeReward(apiBase, secret string, report NodeRewardReport) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+secret)
-	req.Header.Set("X-Platarium-Node-Rewards-Secret", secret)
+	req.Header.Set("User-Agent", "PlatariumGateway/node-rewards")
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
@@ -50,14 +50,11 @@ func ReportNodeReward(apiBase, secret string, report NodeRewardReport) error {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("node-rewards HTTP %d: %s", resp.StatusCode, stringsTrim(string(raw)))
+		msg := string(raw)
+		if len(msg) > 200 {
+			msg = msg[:200] + "…"
+		}
+		return fmt.Errorf("node-rewards HTTP %d: %s", resp.StatusCode, msg)
 	}
 	return nil
-}
-
-func stringsTrim(s string) string {
-	if len(s) > 200 {
-		return s[:200] + "…"
-	}
-	return s
 }

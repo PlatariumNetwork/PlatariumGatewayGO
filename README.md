@@ -109,8 +109,7 @@ If Core CLI or state file is unavailable, balance/faucet endpoints return **503 
 |---------|-------------|
 | `PLATARIUM_ALLOW_DEGRADED_CONSENSUS` | `true` (default): accept L1/L2 with proposer-only vote when peers do not respond. Set `false` for strict multi-node mode. |
 | `PLATARIUM_OPERATOR_WALLET` | Operator `Px…` wallet. When this node earns L1/L2 fee shares, credits fee (μPLP) to the wallet and reports Contributor Leaderboard XP (min 10; scales with network load + selection-weight distribution). |
-| `PLATARIUM_CONTRIBUTORS_API_URL` | Scan base URL for XP reporting (e.g. `https://platarium.network`). Requires `PLATARIUM_NODE_REWARDS_SECRET`. |
-| `PLATARIUM_NODE_REWARDS_SECRET` | Shared bearer secret with Scan (`POST /api/contributors/node-rewards`). |
+| `PLATARIUM_CONTRIBUTORS_API_URL` | Scan base URL for XP reporting (e.g. `https://platarium.network`). Public endpoint — no shared secret. |
 | `PLATARIUM_AUTO_BLOCK` | `true` on testnet (default): background worker runs L1/L2 automatically. Set `false` to disable. |
 | `PLATARIUM_AUTO_BLOCK_L1_INTERVAL_SEC` | L1 collect interval when mempool is non-empty and no pending block (default: `5`) |
 | `PLATARIUM_AUTO_BLOCK_L2_INTERVAL_SEC` | L2 confirm interval when a pending block exists (default: `30`) |
