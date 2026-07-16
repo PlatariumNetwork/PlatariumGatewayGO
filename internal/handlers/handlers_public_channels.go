@@ -95,6 +95,10 @@ func (h *Handler) ListPublicChannels(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, map[string]interface{}{"channel": rec})
 		return
 	}
+	if owner := strings.TrimSpace(r.URL.Query().Get("owner")); owner != "" {
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"channels": h.publicChannels.ListByOwner(owner)})
+		return
+	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"channels": h.publicChannels.List()})
 }
 

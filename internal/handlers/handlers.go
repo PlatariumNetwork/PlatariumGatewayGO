@@ -87,6 +87,14 @@ type Handler struct {
 	publicChannelPosts *publicchannel.PostStore
 
 	autoBlockMu sync.Mutex
+
+	// Operator wallet (PLATARIUM_OPERATOR_WALLET): receives validation fee credits + Contributor XP.
+	operatorWallet        string
+	contributorsAPIURL    string
+	nodeRewardsSecret     string
+	networkID             string
+	operatorRewardedMu    sync.Mutex
+	operatorRewardedBlock map[uint64]bool
 }
 
 type l2VoteRound struct {
@@ -135,16 +143,26 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 	}
 
 	h := &Handler{
-		blockchain:      bc,
-		nodesManager:    nm,
-		wsServer:        ws,
-		rustCore:        rustCore,
-		testnet:         testnet,
-		distributor:     rewards.NewDistributor(),
-		nodeRegistry:    rating.NewRegistry(),
-		allNodeEarnings: make(map[string][2]int64),
-		l1VotedIds:      make(map[string]bool),
-		l2VotedIds:      make(map[string]bool),
+		blockchain:            bc,
+		nodesManager:          nm,
+		wsServer:              ws,
+		rustCore:              rustCore,
+		testnet:               testnet,
+		distributor:           rewards.NewDistributor(),
+		nodeRegistry:          rating.NewRegistry(),
+		allNodeEarnings:       make(map[string][2]int64),
+		l1VotedIds:            make(map[string]bool),
+		l2VotedIds:            make(map[string]bool),
+		operatorWallet:        rewards.OperatorWalletFromEnv(),
+		contributorsAPIURL:    rewards.ContributorsAPIURLFromEnv(),
+		nodeRewardsSecret:     rewards.NodeRewardsSecretFromEnv(),
+		networkID:             nonEmpty(os.Getenv("PLATARIUM_NETWORK_ID"), "melancholy-testnet"),
+		operatorRewardedBlock: make(map[uint64]bool),
+	}
+	if h.operatorWallet != "" {
+		log.Printf("[INFO] Operator wallet for node rewards: %s", h.operatorWallet)
+	} else {
+		log.Printf("[INFO] PLATARIUM_OPERATOR_WALLET unset — validation fees/XP will not credit a contributor wallet")
 	}
 	if bc.Ledger() != nil {
 		h.initChainPersistence(stateFile)
@@ -577,6 +595,119 @@ func (h *Handler) recordEarnings(l1Shares, l2Shares map[string]int64) {
 	h.nodeEarnedMu.Unlock()
 }
 
+// networkLoadPct returns max LoadScore% among registered connected candidates (Validation Model load).
+func (h *Handler) networkLoadPct() int {
+	myId := h.nodesManager.GetNodeID()
+	candidates := []string{myId}
+	for _, n := range h.nodesManager.GetConnectedNodes() {
+		candidates = append(candidates, n.NodeID)
+	}
+	loadPct := 0
+	for _, id := range candidates {
+		if n := h.nodeRegistry.Get(id); n != nil {
+			pct := int(n.LoadScore * 100 / rating.ScoreScale)
+			if pct > loadPct {
+				loadPct = pct
+			}
+		}
+	}
+	return loadPct
+}
+
+// applyOperatorBlockReward credits this node's fee share to PLATARIUM_OPERATOR_WALLET
+// and reports Contributor XP (min 10, scaled by load + selection-weight distribution).
+func (h *Handler) applyOperatorBlockReward(blockNumber uint64, loadPct int, l1Shares, l2Shares map[string]int64) {
+	if h.operatorWallet == "" {
+		return
+	}
+	myId := h.nodesManager.GetNodeID()
+	l1 := l1Shares[myId]
+	l2 := l2Shares[myId]
+	feeTotal := l1 + l2
+	if feeTotal <= 0 {
+		return
+	}
+
+	h.operatorRewardedMu.Lock()
+	if h.operatorRewardedBlock[blockNumber] {
+		h.operatorRewardedMu.Unlock()
+		return
+	}
+	h.operatorRewardedBlock[blockNumber] = true
+	// Bound map growth
+	if len(h.operatorRewardedBlock) > 5000 {
+		h.operatorRewardedBlock = map[uint64]bool{blockNumber: true}
+	}
+	h.operatorRewardedMu.Unlock()
+
+	// Credit μPLP fee share to operator wallet (testnet ledger), same units as block TotalFees.
+	if ledger := h.blockchain.Ledger(); ledger != nil && feeTotal > 0 {
+		if err := ledger.Credit(h.operatorWallet, 0, uint64(feeTotal)); err != nil {
+			logger.Warn("operator fee credit failed wallet=%s fee_uplp=%d: %v", h.operatorWallet, feeTotal, err)
+		} else {
+			logger.Info("operator fee credited wallet=%s fee_uplp=%d (l1=%d l2=%d) block=%d",
+				h.operatorWallet, feeTotal, l1, l2, blockNumber)
+		}
+	}
+
+	// Selection-weight distribution among earners (YES voters that received a share).
+	earners := make(map[string]struct{})
+	for id, amt := range l1Shares {
+		if amt > 0 {
+			earners[id] = struct{}{}
+		}
+	}
+	for id, amt := range l2Shares {
+		if amt > 0 {
+			earners[id] = struct{}{}
+		}
+	}
+	var totalWeight int64
+	for id := range earners {
+		w := h.nodeRegistry.SelectionWeightFor(id)
+		if w <= 0 {
+			w = 1
+		}
+		totalWeight += w
+	}
+	myWeight := h.nodeRegistry.SelectionWeightFor(myId)
+	if myWeight <= 0 {
+		myWeight = 1
+	}
+	xp := rewards.ComputeValidationXP(loadPct, myWeight, totalWeight, len(earners))
+	ref := fmt.Sprintf("%s:block:%d:node:%s", h.networkID, blockNumber, myId)
+	reason := fmt.Sprintf(
+		"Node validation reward (block %d, load %d%%, fee %d μPLP, L1=%d L2=%d)",
+		blockNumber, loadPct, feeTotal, l1, l2,
+	)
+
+	if h.contributorsAPIURL == "" || h.nodeRewardsSecret == "" {
+		logger.Info("operator XP computed xp=%d ref=%s (contributors API not configured — set PLATARIUM_CONTRIBUTORS_API_URL + PLATARIUM_NODE_REWARDS_SECRET)", xp, ref)
+		return
+	}
+
+	report := rewards.NodeRewardReport{
+		WalletAddress: h.operatorWallet,
+		NodeID:        myId,
+		BlockNumber:   blockNumber,
+		NetworkID:     h.networkID,
+		XP:            xp,
+		FeeUplp:       feeTotal,
+		L1ShareUplp:   l1,
+		L2ShareUplp:   l2,
+		LoadPct:       loadPct,
+		ReferenceID:   ref,
+		Reason:        reason,
+	}
+	go func() {
+		if err := rewards.ReportNodeReward(h.contributorsAPIURL, h.nodeRewardsSecret, report); err != nil {
+			logger.Warn("operator XP report failed ref=%s: %v", ref, err)
+			return
+		}
+		logger.Info("operator XP reported wallet=%s xp=%d ref=%s", h.operatorWallet, xp, ref)
+	}()
+}
+
 // onFeeDistribution handles fee_distribution broadcast from another node.
 func (h *Handler) onFeeDistribution(data map[string]interface{}) {
 	l1Raw, _ := data["l1Shares"].(map[string]interface{})
@@ -604,6 +735,17 @@ func (h *Handler) onFeeDistribution(data map[string]interface{}) {
 	}
 	if burn > 0 || treasury > 0 {
 		h.distributor.AddBurnTreasury(burn, treasury)
+	}
+	var blockNumber uint64
+	if bn, ok := data["blockNumber"].(float64); ok && bn >= 0 {
+		blockNumber = uint64(bn)
+	}
+	loadPct := h.networkLoadPct()
+	if lp, ok := data["loadPct"].(float64); ok {
+		loadPct = int(lp)
+	}
+	if blockNumber > 0 {
+		h.applyOperatorBlockReward(blockNumber, loadPct, l1Shares, l2Shares)
 	}
 }
 
@@ -1584,15 +1726,17 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 	burned, treasury := h.distributor.Totals()
 	cfg := h.distributor.GetConfig()
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"chainTxCount":    st.ChainTxCount,
-		"mempoolCount":    st.MempoolCount,
-		"pendingCount":    st.PendingCount,
-		"totalFees":       st.TotalFees,
-		"lastBlockNumber": st.LastBlockNum,
-		"nodeEarnedFees":  earnedL2,
-		"nodeEarnedL1":    earnedL1,
-		"totalBurned":     burned,
-		"totalTreasury":   treasury,
+		"chainTxCount":     st.ChainTxCount,
+		"mempoolCount":     st.MempoolCount,
+		"pendingCount":     st.PendingCount,
+		"totalFees":        st.TotalFees,
+		"lastBlockNumber":  st.LastBlockNum,
+		"nodeEarnedFees":   earnedL2,
+		"nodeEarnedL1":     earnedL1,
+		"totalBurned":      burned,
+		"totalTreasury":    treasury,
+		"operatorWallet":   h.operatorWallet,
+		"networkId":        h.networkID,
 		"rewardConfig": map[string]interface{}{
 			"burnPct":     cfg.BurnPct,
 			"treasuryPct": cfg.TreasuryPct,
@@ -2495,6 +2639,8 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		l1Shares := h.distributePool(l1Pool, l1VotersCopy)
 		l2Shares := h.distributePool(l2Pool, round.votes)
 		h.recordEarnings(l1Shares, l2Shares)
+		loadPctReward := h.networkLoadPct()
+		h.applyOperatorBlockReward(uint64(block.BlockNumber), loadPctReward, l1Shares, l2Shares)
 
 		logger.Info("L2 fee distribution: l1Pool=%d (among %d L1 voters), l2Pool=%d (among %d L2 voters)",
 			l1Pool, len(l1Shares), l2Pool, len(l2Shares))
@@ -2515,6 +2661,7 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 			"totalFees":   block.TotalFees,
 			"burn":        sr.Burn,
 			"treasury":    sr.Treasury,
+			"loadPct":     loadPctReward,
 		}, myId)
 	}
 	for _, tx := range moved {

@@ -145,3 +145,17 @@ func (r *Registry) List() []Record {
 	}
 	return out
 }
+
+// ListByOwner returns channels whose ownerAddress matches (case-insensitive).
+func (r *Registry) ListByOwner(ownerAddress string) []Record {
+	owner := strings.TrimSpace(ownerAddress)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Record, 0)
+	for _, rec := range r.channels {
+		if strings.EqualFold(rec.OwnerAddress, owner) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
