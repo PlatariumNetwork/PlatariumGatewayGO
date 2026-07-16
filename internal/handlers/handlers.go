@@ -91,7 +91,6 @@ type Handler struct {
 	// Operator wallet (PLATARIUM_OPERATOR_WALLET): receives validation fee credits + Contributor XP.
 	operatorWallet        string
 	contributorsAPIURL    string
-	nodeRewardsSecret     string
 	networkID             string
 	operatorRewardedMu    sync.Mutex
 	operatorRewardedBlock map[uint64]bool
@@ -155,7 +154,6 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 		l2VotedIds:            make(map[string]bool),
 		operatorWallet:        rewards.OperatorWalletFromEnv(),
 		contributorsAPIURL:    rewards.ContributorsAPIURLFromEnv(),
-		nodeRewardsSecret:     rewards.NodeRewardsSecretFromEnv(),
 		networkID:             nonEmpty(os.Getenv("PLATARIUM_NETWORK_ID"), "melancholy-testnet"),
 		operatorRewardedBlock: make(map[uint64]bool),
 	}
@@ -681,8 +679,8 @@ func (h *Handler) applyOperatorBlockReward(blockNumber uint64, loadPct int, l1Sh
 		blockNumber, loadPct, feeTotal, l1, l2,
 	)
 
-	if h.contributorsAPIURL == "" || h.nodeRewardsSecret == "" {
-		logger.Info("operator XP computed xp=%d ref=%s (contributors API not configured — set PLATARIUM_CONTRIBUTORS_API_URL + PLATARIUM_NODE_REWARDS_SECRET)", xp, ref)
+	if h.contributorsAPIURL == "" {
+		logger.Info("operator XP computed xp=%d ref=%s (set PLATARIUM_CONTRIBUTORS_API_URL to report to Scan leaderboard)", xp, ref)
 		return
 	}
 
@@ -700,7 +698,7 @@ func (h *Handler) applyOperatorBlockReward(blockNumber uint64, loadPct int, l1Sh
 		Reason:        reason,
 	}
 	go func() {
-		if err := rewards.ReportNodeReward(h.contributorsAPIURL, h.nodeRewardsSecret, report); err != nil {
+		if err := rewards.ReportNodeReward(h.contributorsAPIURL, report); err != nil {
 			logger.Warn("operator XP report failed ref=%s: %v", ref, err)
 			return
 		}

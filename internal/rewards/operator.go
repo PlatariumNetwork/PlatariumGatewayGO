@@ -16,11 +16,6 @@ func ContributorsAPIURLFromEnv() string {
 	return strings.TrimRight(strings.TrimSpace(os.Getenv("PLATARIUM_CONTRIBUTORS_API_URL")), "/")
 }
 
-// NodeRewardsSecretFromEnv authenticates POST /api/contributors/node-rewards on Scan.
-func NodeRewardsSecretFromEnv() string {
-	return strings.TrimSpace(os.Getenv("PLATARIUM_NODE_REWARDS_SECRET"))
-}
-
 func normalizeOperatorWallet(addr string) string {
 	v := strings.TrimSpace(addr)
 	if len(v) < 3 {
