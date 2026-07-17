@@ -200,6 +200,30 @@ func extractFailedTxHash(msg string) string {
 	return hash
 }
 
+// extractApplyTxHash pulls a tx hash from L2 apply errors or JSON error bodies.
+// Matches: `apply tx <hash>:` and bare hash mentions after "apply tx ".
+func extractApplyTxHash(body []byte) string {
+	msg := string(body)
+	const prefix = "apply tx "
+	idx := strings.Index(msg, prefix)
+	if idx < 0 {
+		if h := extractFailedTxHash(msg); h != "" {
+			return h
+		}
+		return ""
+	}
+	hash := strings.TrimSpace(msg[idx+len(prefix):])
+	if i := strings.IndexAny(hash, " \t\n\r,:;"); i >= 0 {
+		hash = hash[:i]
+	}
+	// Strip JSON trailing quote if present.
+	hash = strings.Trim(hash, `"'`)
+	if len(hash) < 16 {
+		return ""
+	}
+	return hash
+}
+
 func (h *Handler) assembleBlockHeader(blockNumber int64, txs []*blockchain.Transaction, producerNodeID string, timestamp int64) (*core.BlockHeader, error) {
 	ledger := h.blockchain.Ledger()
 	if ledger == nil || h.rustCore == nil {

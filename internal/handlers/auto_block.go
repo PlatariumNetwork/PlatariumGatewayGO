@@ -11,11 +11,18 @@ import (
 
 type autoBlockResponseWriter struct {
 	status int
+	body   []byte
 }
 
 func (w *autoBlockResponseWriter) Header() http.Header { return http.Header{} }
 
-func (w *autoBlockResponseWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (w *autoBlockResponseWriter) Write(p []byte) (int, error) {
+	w.body = append(w.body, p...)
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return len(p), nil
+}
 
 func (w *autoBlockResponseWriter) WriteHeader(statusCode int) { w.status = statusCode }
 
@@ -62,12 +69,33 @@ func (h *Handler) autoBlockTick() {
 
 	// Confirm pending before collecting new txs.
 	if len(h.blockchain.GetPendingBlock()) > 0 {
-		pending := len(h.blockchain.GetPendingBlock())
-		logger.Info("Auto block: L2 confirm pending=%d", pending)
+		pending := h.blockchain.GetPendingBlock()
+		logger.Info("Auto block: L2 confirm pending=%d", len(pending))
+
+		// Drop poison txs before voting/apply so one bad FIFO entry cannot stall forever.
+		if outcome := h.validateTxsForL1(pending); !outcome.OK {
+			if len(outcome.InvalidHashes) > 0 {
+				returned, dropped := h.blockchain.AbandonPendingBlock(outcome.InvalidHashes)
+				logger.Warn("Auto L2: abandoned pending returned=%d dropped=%d (%v)",
+					returned, dropped, outcome.Err)
+				return
+			}
+		}
+
 		w := &autoBlockResponseWriter{}
 		h.L2ConfirmBlock(w, autoBlockPOST())
 		if w.status >= 400 && w.status != 0 {
-			logger.Warn("Auto L2 confirm finished with HTTP %d", w.status)
+			logger.Warn("Auto L2 confirm finished with HTTP %d body=%s", w.status, string(w.body))
+			// Handler already abandons on apply failure; clear any leftover pending.
+			if len(h.blockchain.GetPendingBlock()) > 0 {
+				failHash := extractApplyTxHash(w.body)
+				var drop []string
+				if failHash != "" {
+					drop = []string{failHash}
+				}
+				returned, dropped := h.blockchain.AbandonPendingBlock(drop)
+				logger.Warn("Auto L2 recovery: drop=%s returned=%d dropped=%d", shortId(failHash), returned, dropped)
+			}
 		}
 		return
 	}

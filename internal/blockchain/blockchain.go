@@ -3,6 +3,8 @@ package blockchain
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -435,6 +437,7 @@ func parseFee(fee string) int64 {
 }
 
 // applyConfirmedTransactions applies each transaction through Core ledger.
+// The state file is snapshotted first so a mid-batch failure can roll back cleanly.
 func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) error {
 	bc.mu.RLock()
 	ledger := bc.ledger
@@ -442,6 +445,20 @@ func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) error {
 	if ledger == nil {
 		return fmt.Errorf("core ledger unavailable")
 	}
+	statePath := ledger.StateFilePath()
+	backupPath := statePath + ".l2bak"
+	if err := copyFile(statePath, backupPath); err != nil {
+		return fmt.Errorf("snapshot state before L2 apply: %w", err)
+	}
+	defer os.Remove(backupPath)
+
+	rollback := func() {
+		if err := copyFile(backupPath, statePath); err != nil {
+			// Best-effort; caller still sees the original apply error.
+			_ = err
+		}
+	}
+
 	for _, tx := range txs {
 		if tx == nil {
 			continue
@@ -450,19 +467,68 @@ func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) error {
 			amt := parseAmount(tx)
 			uplp := tx.FeeUplp
 			if err := ledger.Credit(tx.To, amt, uplp); err != nil {
+				rollback()
 				return fmt.Errorf("faucet credit %s: %w", tx.Hash, err)
 			}
 			continue
 		}
 		coreJSON, ok := ToCoreJSON(tx)
 		if !ok {
+			rollback()
 			return fmt.Errorf("transaction %s is not Core-compatible", tx.Hash)
 		}
 		if _, err := ledger.ApplyTx(coreJSON); err != nil {
+			rollback()
 			return fmt.Errorf("apply tx %s: %w", tx.Hash, err)
 		}
 	}
 	return nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
+// AbandonPendingBlock clears the pending block. Hashes in drop are discarded;
+// all other pending txs are returned to the mempool so the chain can progress.
+func (bc *Blockchain) AbandonPendingBlock(drop []string) (returned, dropped int) {
+	dropSet := make(map[string]bool, len(drop))
+	for _, h := range drop {
+		if h != "" {
+			dropSet[h] = true
+		}
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.pendingBlock) == 0 {
+		return 0, 0
+	}
+	for _, tx := range bc.pendingBlock {
+		if tx == nil || tx.Hash == "" {
+			continue
+		}
+		if dropSet[tx.Hash] {
+			dropped++
+			continue
+		}
+		bc.mempool = append(bc.mempool, tx)
+		returned++
+	}
+	bc.pendingBlock = bc.pendingBlock[:0]
+	return returned, dropped
 }
 
 // L2ConfirmBlock moves pending block into chain (L2 confirmed), applying state via Core.
