@@ -1353,9 +1353,13 @@ func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// Rocks tx payloads often omit blockNumber; attach from chain index (includes block 0).
 	if bn, ok := h.blockchain.TxHashToBlockNumber()[hash]; ok {
 		tx.BlockNumber = bn
+		if tx.Timestamp <= 0 {
+			if b := h.blockchain.GetBlockByNumber(bn); b != nil && b.Timestamp > 0 {
+				tx.Timestamp = b.Timestamp
+			}
+		}
 	}
 	jsonResponse(w, http.StatusOK, tx)
 }
@@ -1621,6 +1625,12 @@ func (h *Handler) GetAllTransactions(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) buildExplorerTransactionList() []map[string]interface{} {
 	blockByHash := h.blockchain.TxHashToBlockNumber()
+	blockTs := make(map[int64]int64)
+	for _, b := range h.blockchain.GetBlockHistory() {
+		if b.Timestamp > 0 {
+			blockTs[b.BlockNumber] = b.Timestamp
+		}
+	}
 	seen := make(map[string]bool)
 	out := make([]map[string]interface{}, 0)
 
@@ -1633,14 +1643,22 @@ func (h *Handler) buildExplorerTransactionList() []map[string]interface{} {
 		if m == nil {
 			return
 		}
-		// Prefer chain index (includes gateway block 0). BlockNumber>0 is a fallback for
-		// in-memory confirms before Rocks index is refreshed.
 		if bn, ok := blockByHash[tx.Hash]; ok {
 			m["blockNumber"] = bn
 			m["status"] = "confirmed"
+			if txMapTimestamp(m) <= 0 {
+				if ts := blockTs[bn]; ts > 0 {
+					m["timestamp"] = ts
+				}
+			}
 		} else if tx.BlockNumber > 0 {
 			m["blockNumber"] = tx.BlockNumber
 			m["status"] = "confirmed"
+			if txMapTimestamp(m) <= 0 {
+				if ts := blockTs[tx.BlockNumber]; ts > 0 {
+					m["timestamp"] = ts
+				}
+			}
 		}
 		out = append(out, m)
 	}

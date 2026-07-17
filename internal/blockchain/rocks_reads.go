@@ -174,6 +174,10 @@ func (bc *Blockchain) listConfirmedTxsFromRocks() ([]*Transaction, error) {
 				continue
 			}
 			tx.BlockNumber = core.RocksHeightToGatewayBlock(h)
+			// Legacy commits omitted timestamp in Core JSON — fall back to block time.
+			if tx.Timestamp <= 0 && stored.Timestamp > 0 {
+				tx.Timestamp = stored.Timestamp
+			}
 			seen[hash] = true
 			out = append(out, tx)
 		}

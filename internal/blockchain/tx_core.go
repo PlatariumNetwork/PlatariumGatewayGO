@@ -56,6 +56,9 @@ func ToCoreJSON(tx *Transaction) (string, bool) {
 		"sig_main":    tx.SigMain,
 		"sig_derived": tx.SigDerived,
 	}
+	if tx.Timestamp > 0 {
+		m["timestamp"] = tx.Timestamp
+	}
 	if tx.PubMain != "" {
 		m["pub_main"] = tx.PubMain
 	}
