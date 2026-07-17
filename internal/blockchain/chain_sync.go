@@ -5,11 +5,17 @@ import "encoding/json"
 // HeadBlockNumber returns the latest confirmed block number, or -1 if empty.
 func (bc *Blockchain) HeadBlockNumber() int64 {
 	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-	if len(bc.blockHistory) == 0 {
-		return -1
+	memHead := int64(-1)
+	if len(bc.blockHistory) > 0 {
+		memHead = bc.blockHistory[len(bc.blockHistory)-1].BlockNumber
 	}
-	return bc.blockHistory[len(bc.blockHistory)-1].BlockNumber
+	bc.mu.RUnlock()
+	if rocksHead, ok := bc.headBlockNumberFromRocks(); ok {
+		if rocksHead > memHead {
+			return rocksHead
+		}
+	}
+	return memHead
 }
 
 // HeadBlock returns a copy of the latest block record, or nil if empty.

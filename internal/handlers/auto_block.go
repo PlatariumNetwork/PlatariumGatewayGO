@@ -3,7 +3,6 @@ package handlers
 import (
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +19,7 @@ func (w *autoBlockResponseWriter) Write(p []byte) (int, error) { return len(p), 
 
 func (w *autoBlockResponseWriter) WriteHeader(statusCode int) { w.status = statusCode }
 
-// AutoBlockEnabled reports whether the background L1/L2 worker should run.
+// AutoBlockEnabled reports whether the background block worker should run.
 func AutoBlockEnabled(testnet bool) bool {
 	v := strings.TrimSpace(os.Getenv("PLATARIUM_AUTO_BLOCK"))
 	if v == "" {
@@ -34,33 +33,6 @@ func AutoBlockEnabled(testnet bool) bool {
 	}
 }
 
-// AutoBlockIntervals returns L1 and L2 ticker intervals from env (defaults 5s / 30s).
-func AutoBlockIntervals() (l1 time.Duration, l2 time.Duration) {
-	l1Sec := envPositiveInt("PLATARIUM_AUTO_BLOCK_L1_INTERVAL_SEC", 5)
-	l2Sec := envPositiveInt("PLATARIUM_AUTO_BLOCK_L2_INTERVAL_SEC", 30)
-	if l2Sec < l1Sec {
-		l2Sec = l1Sec
-	}
-	return time.Duration(l1Sec) * time.Second, time.Duration(l2Sec) * time.Second
-}
-
-func envPositiveInt(name string, defaultVal int) int {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return defaultVal
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1 {
-		return defaultVal
-	}
-	return n
-}
-
-// autoBlockL1TxLimit returns how many mempool txs each auto L1 tick collects (default 1 on testnet).
-func autoBlockL1TxLimit() int {
-	return envPositiveInt("PLATARIUM_AUTO_BLOCK_L1_TX_LIMIT", 1)
-}
-
 func (h *Handler) pruneMempoolBeforeL1() int {
 	removed := h.blockchain.PruneMempool()
 	if removed > 0 {
@@ -69,71 +41,53 @@ func (h *Handler) pruneMempoolBeforeL1() int {
 	return removed
 }
 
-// StartAutoBlockWorker runs periodic L1 collect (mempool → pending) and L2 confirm (pending → chain).
-func (h *Handler) StartAutoBlockWorker(l1Every, l2Every time.Duration) {
-	logger.Info("Auto block worker started: L1 every %v, L2 every %v", l1Every, l2Every)
+// StartAutoBlockWorker runs L1/L2 orchestration; block consensus rules always come from Core.
+func (h *Handler) StartAutoBlockWorker() {
+	const pollInterval = 2 * time.Second
+	logger.Info("Block worker started (poll=%v); proposal/packing/admission via PlatariumCore", pollInterval)
 	go func() {
-		l1Ticker := time.NewTicker(l1Every)
-		l2Ticker := time.NewTicker(l2Every)
-		defer l1Ticker.Stop()
-		defer l2Ticker.Stop()
-		for {
-			select {
-			case <-l1Ticker.C:
-				h.autoL1Tick()
-			case <-l2Ticker.C:
-				h.autoL2Tick()
-			}
+		ticker := time.NewTicker(pollInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			h.autoBlockTick()
 		}
 	}()
 }
 
-func (h *Handler) autoL1Tick() {
-	if len(h.blockchain.GetMempool()) == 0 {
-		return
-	}
-	if len(h.blockchain.GetPendingBlock()) > 0 {
-		return
-	}
+func (h *Handler) autoBlockTick() {
 	if !h.autoBlockMu.TryLock() {
 		return
 	}
 	defer h.autoBlockMu.Unlock()
 
-	h.pruneMempoolBeforeL1()
-	mempool := h.blockchain.GetMempool()
-	if len(mempool) == 0 {
+	// Confirm pending before collecting new txs.
+	if len(h.blockchain.GetPendingBlock()) > 0 {
+		pending := len(h.blockchain.GetPendingBlock())
+		logger.Info("Auto block: L2 confirm pending=%d", pending)
+		w := &autoBlockResponseWriter{}
+		h.L2ConfirmBlock(w, autoBlockPOST())
+		if w.status >= 400 && w.status != 0 {
+			logger.Warn("Auto L2 confirm finished with HTTP %d", w.status)
+		}
 		return
 	}
 
-	limit := autoBlockL1TxLimit()
-	logger.Info("Auto L1 tick: mempool=%d collectLimit=%d", len(mempool), limit)
+	status, err := h.coreBlockProposalStatus()
+	if err != nil {
+		logger.Warn("Core block proposal status failed: %v", err)
+		return
+	}
+	if !status.ShouldPropose {
+		return
+	}
+
+	logger.Info("Auto block: Core proposal mempool=%d gas=%d cap=%d minFee=%d",
+		status.MempoolCount, status.MempoolGasUplp, status.BlockGasCapUplp, status.MinFeeUplp)
+
 	w := &autoBlockResponseWriter{}
-	h.l1CollectBlockRun(w, autoBlockPOST(), limit)
+	h.l1CollectBlockRun(w, autoBlockPOST())
 	if w.status >= 400 && w.status != 0 {
 		logger.Warn("Auto L1 collect finished with HTTP %d", w.status)
-		if limit == 1 && len(mempool) > 0 {
-			h.blockchain.RemoveFromMempool([]string{mempool[0].Hash})
-			logger.Warn("Auto L1 dropped head mempool tx %s after failure", mempool[0].Hash)
-		}
-	}
-}
-
-func (h *Handler) autoL2Tick() {
-	if len(h.blockchain.GetPendingBlock()) == 0 {
-		return
-	}
-	if !h.autoBlockMu.TryLock() {
-		return
-	}
-	defer h.autoBlockMu.Unlock()
-
-	pending := len(h.blockchain.GetPendingBlock())
-	logger.Info("Auto L2 tick: pending=%d", pending)
-	w := &autoBlockResponseWriter{}
-	h.L2ConfirmBlock(w, autoBlockPOST())
-	if w.status >= 400 && w.status != 0 {
-		logger.Warn("Auto L2 confirm finished with HTTP %d", w.status)
 	}
 }
 
