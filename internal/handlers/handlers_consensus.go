@@ -210,7 +210,7 @@ func (h *Handler) assembleBlockHeader(blockNumber int64, txs []*blockchain.Trans
 	if err != nil {
 		return nil, err
 	}
-	prevHash := h.blockchain.GetPreviousBlockHash()
+	prevHash := h.blockchain.PreviousHashForBlock(blockNumber)
 	return h.rustCore.AssembleBlock(
 		ledger.StateFilePath(),
 		uint64(blockNumber),

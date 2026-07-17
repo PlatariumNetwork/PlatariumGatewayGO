@@ -794,20 +794,50 @@ func (bc *Blockchain) InstantFaucetCredit(to string, plp uint64) (*Transaction, 
 
 const genesisPreviousHash = "0000000000000000000000000000000000000000000000000000000000000000"
 
-// GetPreviousBlockHash returns the hash of the last confirmed block, or genesis hash.
+// GetPreviousBlockHash returns the hash of the latest block that already has a BlockHash.
+// Important: L2ConfirmBlock appends the new block before assemble/ApplyBlockHeader, so the
+// tip may temporarily have an empty hash — skip those or every block would link to genesis.
 func (bc *Blockchain) GetPreviousBlockHash() string {
 	bc.mu.RLock()
-	if len(bc.blockHistory) > 0 {
-		last := bc.blockHistory[len(bc.blockHistory)-1]
-		if last.BlockHash != "" {
+	for i := len(bc.blockHistory) - 1; i >= 0; i-- {
+		if h := bc.blockHistory[i].BlockHash; h != "" {
 			bc.mu.RUnlock()
-			return last.BlockHash
+			return h
 		}
 	}
 	bc.mu.RUnlock()
 
-	if head := bc.HeadBlock(); head != nil && head.BlockHash != "" {
-		return head.BlockHash
+	if rocksHead, ok := bc.headBlockNumberFromRocks(); ok && rocksHead >= 0 {
+		// Prefer the latest rocks block that already has a hash (usually the tip).
+		if b := bc.getBlockFromRocks(rocksHead); b != nil && b.BlockHash != "" {
+			return b.BlockHash
+		}
+		if rocksHead > 0 {
+			if b := bc.getBlockFromRocks(rocksHead - 1); b != nil && b.BlockHash != "" {
+				return b.BlockHash
+			}
+		}
+	}
+	return genesisPreviousHash
+}
+
+// PreviousHashForBlock returns the parent hash that blockNumber should reference.
+func (bc *Blockchain) PreviousHashForBlock(blockNumber int64) string {
+	if blockNumber <= 0 {
+		return genesisPreviousHash
+	}
+	parent := blockNumber - 1
+	bc.mu.RLock()
+	for i := range bc.blockHistory {
+		if bc.blockHistory[i].BlockNumber == parent && bc.blockHistory[i].BlockHash != "" {
+			h := bc.blockHistory[i].BlockHash
+			bc.mu.RUnlock()
+			return h
+		}
+	}
+	bc.mu.RUnlock()
+	if b := bc.getBlockFromRocks(parent); b != nil && b.BlockHash != "" {
+		return b.BlockHash
 	}
 	return genesisPreviousHash
 }
