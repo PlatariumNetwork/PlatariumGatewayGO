@@ -130,15 +130,22 @@ func (bc *Blockchain) GetBalance(address string) (string, error) {
 }
 
 // GetAccountQuery returns full Core account state for an address.
+// Live ledger (state file) is authoritative for nonce/balance used by the next TX.
+// RocksDB can lag when a commit fails or after faucet credits that only touch the ledger.
 func (bc *Blockchain) GetAccountQuery(address string) (*core.AccountQuery, error) {
+	bc.mu.RLock()
+	ledger := bc.ledger
+	bc.mu.RUnlock()
+	if ledger != nil {
+		if q, err := ledger.Query(address); err == nil {
+			return q, nil
+		}
+	}
 	if bc.RocksEnabled() {
 		if q, err := bc.getAccountFromRocks(address); err == nil {
 			return q, nil
 		}
 	}
-	bc.mu.RLock()
-	ledger := bc.ledger
-	bc.mu.RUnlock()
 	if ledger == nil {
 		return nil, fmt.Errorf("core ledger unavailable")
 	}
@@ -790,13 +797,17 @@ const genesisPreviousHash = "000000000000000000000000000000000000000000000000000
 // GetPreviousBlockHash returns the hash of the last confirmed block, or genesis hash.
 func (bc *Blockchain) GetPreviousBlockHash() string {
 	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-	if len(bc.blockHistory) == 0 {
-		return genesisPreviousHash
+	if len(bc.blockHistory) > 0 {
+		last := bc.blockHistory[len(bc.blockHistory)-1]
+		if last.BlockHash != "" {
+			bc.mu.RUnlock()
+			return last.BlockHash
+		}
 	}
-	last := bc.blockHistory[len(bc.blockHistory)-1]
-	if last.BlockHash != "" {
-		return last.BlockHash
+	bc.mu.RUnlock()
+
+	if head := bc.HeadBlock(); head != nil && head.BlockHash != "" {
+		return head.BlockHash
 	}
 	return genesisPreviousHash
 }

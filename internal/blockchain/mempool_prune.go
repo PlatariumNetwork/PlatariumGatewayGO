@@ -1,8 +1,22 @@
 package blockchain
 
-// PruneMempool removes stale entries: txs already in chain and duplicate (from, nonce) pairs.
-// For duplicate nonces the earliest timestamp (FIFO) is kept.
+// PruneMempool removes stale entries: txs already in chain (memory or RocksDB)
+// and duplicate (from, nonce) pairs. For duplicate nonces the earliest timestamp (FIFO) is kept.
 func (bc *Blockchain) PruneMempool() int {
+	// Gather RocksDB confirmed hashes before taking the write lock (rocksClient uses RLock).
+	rocksConfirmed := make(map[string]bool)
+	if bc.RocksEnabled() {
+		if blocks, err := bc.listBlockHistoryFromRocks(); err == nil {
+			for _, block := range blocks {
+				for _, hash := range block.TxHashes {
+					if hash != "" {
+						rocksConfirmed[hash] = true
+					}
+				}
+			}
+		}
+	}
+
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
@@ -13,6 +27,9 @@ func (bc *Blockchain) PruneMempool() int {
 				confirmed[hash] = true
 			}
 		}
+	}
+	for hash := range rocksConfirmed {
+		confirmed[hash] = true
 	}
 
 	pendingHashes := make(map[string]bool, len(bc.pendingBlock))
@@ -33,6 +50,11 @@ func (bc *Blockchain) PruneMempool() int {
 
 	for _, tx := range bc.mempool {
 		if tx == nil || tx.Hash == "" {
+			removed++
+			continue
+		}
+		// Instant faucet credits never belong in the consensus mempool.
+		if tx.From == FaucetAddress || tx.Type == "faucet" {
 			removed++
 			continue
 		}

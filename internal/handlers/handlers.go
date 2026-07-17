@@ -222,8 +222,9 @@ func (h *Handler) validateTxForMempool(tx *blockchain.Transaction) error {
 	if tx == nil {
 		return fmt.Errorf("nil transaction")
 	}
-	if tx.From == blockchain.FaucetAddress {
-		return nil
+	// Faucet credits are applied via InstantFaucetCredit / state-credit — never consensus mempool.
+	if tx.From == blockchain.FaucetAddress || tx.Type == "faucet" {
+		return fmt.Errorf("faucet transactions are not admitted to mempool")
 	}
 	if h.rustCore == nil {
 		return fmt.Errorf("rust core unavailable")
@@ -1628,10 +1629,14 @@ func (h *Handler) buildExplorerTransactionList() []map[string]interface{} {
 		if m == nil {
 			return
 		}
-		if tx.BlockNumber > 0 {
-			m["blockNumber"] = tx.BlockNumber
-		} else if bn, ok := blockByHash[tx.Hash]; ok {
+		// Prefer chain index (includes gateway block 0). BlockNumber>0 is a fallback for
+		// in-memory confirms before Rocks index is refreshed.
+		if bn, ok := blockByHash[tx.Hash]; ok {
 			m["blockNumber"] = bn
+			m["status"] = "confirmed"
+		} else if tx.BlockNumber > 0 {
+			m["blockNumber"] = tx.BlockNumber
+			m["status"] = "confirmed"
 		}
 		out = append(out, m)
 	}
