@@ -1345,13 +1345,17 @@ func isValidFaucetAddress(address string) bool {
 func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	hash := vars["hash"]
-	
+
 	tx := h.blockchain.GetTransaction(hash)
 	if tx == nil {
 		jsonResponse(w, http.StatusNotFound, map[string]string{
 			"error": "Transaction not found",
 		})
 		return
+	}
+	// Rocks tx payloads often omit blockNumber; attach from chain index (includes block 0).
+	if bn, ok := h.blockchain.TxHashToBlockNumber()[hash]; ok {
+		tx.BlockNumber = bn
 	}
 	jsonResponse(w, http.StatusOK, tx)
 }
