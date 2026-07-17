@@ -1917,6 +1917,13 @@ func shortId(id string) string {
 	return id[:6] + "…" + id[len(id)-4:]
 }
 
+func errString(err error) string {
+	if err == nil {
+		return "invalid transactions"
+	}
+	return err.Error()
+}
+
 // sendRewardCreditL1 notifies the L1 beneficiary node to add L1 reward (called when we did L2 but L1 was another node).
 func (h *Handler) sendRewardCreditL1(restBaseURL string, amount int64) {
 	url := restBaseURL + "/api/reward-credit-l1"
@@ -2047,18 +2054,46 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	txHashes := txHashesFromTransactions(collect)
 	blockId := computeVoteBlockID("l1", blockNum, txHashes, stateRoot)
 
-	if valid, err := h.validateTxsForL1(collect); err != nil || !valid {
-		logger.Warn("L1 collect rejected: Core validation failed: %v", err)
-		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
-			"error": "L1 validation failed",
-			"detail": func() string {
-				if err != nil {
-					return err.Error()
-				}
-				return "invalid transactions"
-			}(),
-		})
-		return
+	if outcome := h.validateTxsForL1(collect); !outcome.OK {
+		if len(outcome.InvalidHashes) > 0 {
+			h.blockchain.RemoveFromMempool(outcome.InvalidHashes)
+			logger.Warn("L1 collect: dropped %d invalid mempool tx(s): %v (%v)",
+				len(outcome.InvalidHashes), outcome.InvalidHashes, outcome.Err)
+		} else {
+			logger.Warn("L1 collect rejected: Core validation failed: %v", outcome.Err)
+		}
+		// Retry once with remaining valid txs from this selection (or re-select after drop).
+		retry := outcome.ValidTxs
+		if len(retry) == 0 {
+			h.pruneMempoolBeforeL1()
+			retry = h.selectTxsForBlockCollect()
+		}
+		if len(retry) == 0 {
+			jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
+				"error":           "L1 validation failed",
+				"detail":          errString(outcome.Err),
+				"dropped_invalid": outcome.InvalidHashes,
+			})
+			return
+		}
+		if outcome2 := h.validateTxsForL1(retry); !outcome2.OK {
+			if len(outcome2.InvalidHashes) > 0 {
+				h.blockchain.RemoveFromMempool(outcome2.InvalidHashes)
+				logger.Warn("L1 collect retry: dropped %d more invalid tx(s): %v",
+					len(outcome2.InvalidHashes), outcome2.InvalidHashes)
+			}
+			jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
+				"error":           "L1 validation failed",
+				"detail":          errString(outcome2.Err),
+				"dropped_invalid": append(outcome.InvalidHashes, outcome2.InvalidHashes...),
+			})
+			return
+		}
+		collect = retry
+		txCount = len(collect)
+		txHashes = txHashesFromTransactions(collect)
+		blockId = computeVoteBlockID("l1", blockNum, txHashes, stateRoot)
+		logger.Info("L1 collect recovered after dropping invalid txs; packing %d", txCount)
 	}
 	// All committee logic lives in Core. Network load = max load among candidates (high load on any node → fewer validators).
 	loadPct := 0
