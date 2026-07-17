@@ -2687,6 +2687,22 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 	moved, block, err := h.blockchain.L2ConfirmBlock()
 	if err != nil {
 		logger.Warn("L2 confirm apply failed: %v", err)
+		drop := []string{}
+		if hash := extractApplyTxHash([]byte(err.Error())); hash != "" {
+			drop = []string{hash}
+		} else if hash := extractFailedTxHash(err.Error()); hash != "" {
+			drop = []string{hash}
+		}
+		if len(drop) == 0 {
+			// Unknown poison — discard the whole pack so auto-block cannot stall.
+			for _, tx := range h.blockchain.GetPendingBlock() {
+				if tx != nil && tx.Hash != "" {
+					drop = append(drop, tx.Hash)
+				}
+			}
+		}
+		returned, dropped := h.blockchain.AbandonPendingBlock(drop)
+		logger.Warn("L2 confirm recovery: returned=%d dropped=%d drop=%v", returned, dropped, drop)
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
