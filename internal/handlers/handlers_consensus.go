@@ -61,36 +61,107 @@ func txsToCoreJSONArray(txs []*blockchain.Transaction) (string, bool) {
 	return string(b), true
 }
 
+// l1ValidateOutcome is the result of Core L1 tx checks (may include invalid hashes to drop).
+type l1ValidateOutcome struct {
+	OK             bool
+	Err            error
+	InvalidHashes  []string
+	ValidTxs       []*blockchain.Transaction
+}
+
 // validateTxsForL1 verifies transactions against Core state (L1 confirmation layer).
-func (h *Handler) validateTxsForL1(txs []*blockchain.Transaction) (bool, error) {
+// On failure, InvalidHashes lists txs that must be removed from the mempool so the
+// block worker is not stuck forever on one bad FIFO entry.
+func (h *Handler) validateTxsForL1(txs []*blockchain.Transaction) l1ValidateOutcome {
 	if len(txs) == 0 {
-		return false, fmt.Errorf("empty transaction set")
+		return l1ValidateOutcome{Err: fmt.Errorf("empty transaction set")}
 	}
 	ledger := h.blockchain.Ledger()
 	if ledger == nil {
 		if h.testnet {
-			return false, fmt.Errorf("core ledger unavailable")
+			return l1ValidateOutcome{Err: fmt.Errorf("core ledger unavailable")}
 		}
-		return true, nil
+		return l1ValidateOutcome{OK: true, ValidTxs: txs}
 	}
 	txsJSON, ok := txsToCoreJSONArray(txs)
 	if !ok {
-		return false, fmt.Errorf("transactions not Core-compatible")
+		// Drop any non-Core-compatible entries so they cannot block packing.
+		bad := make([]string, 0)
+		good := make([]*blockchain.Transaction, 0, len(txs))
+		for _, tx := range txs {
+			if tx == nil {
+				continue
+			}
+			if tx.From == blockchain.FaucetAddress {
+				good = append(good, tx)
+				continue
+			}
+			if _, ok := txToCoreJSON(tx); !ok {
+				bad = append(bad, tx.Hash)
+				continue
+			}
+			good = append(good, tx)
+		}
+		if len(bad) > 0 {
+			return l1ValidateOutcome{
+				Err:           fmt.Errorf("transactions not Core-compatible"),
+				InvalidHashes: bad,
+				ValidTxs:      good,
+			}
+		}
+		return l1ValidateOutcome{Err: fmt.Errorf("transactions not Core-compatible")}
 	}
 	if txsJSON == "[]" {
-		return true, nil
+		return l1ValidateOutcome{OK: true, ValidTxs: txs}
 	}
 	if h.rustCore != nil {
 		res, err := h.rustCore.L1VerifyTxs(ledger.StateFilePath(), txsJSON)
-		if err != nil {
-			return false, err
-		}
-		for _, tr := range res.TxResults {
-			if !tr.Valid {
-				return false, fmt.Errorf("L1 verification failed for tx %s", tr.Hash)
+		// Even when Valid=false, Core returns per-tx results — use them to drop poison txs.
+		if res != nil && len(res.TxResults) > 0 {
+			invalid := make([]string, 0)
+			validSet := make(map[string]bool, len(res.TxResults))
+			for _, tr := range res.TxResults {
+				if tr.Valid {
+					validSet[tr.Hash] = true
+				} else if tr.Hash != "" {
+					invalid = append(invalid, tr.Hash)
+				}
 			}
+			good := make([]*blockchain.Transaction, 0, len(txs))
+			for _, tx := range txs {
+				if tx == nil {
+					continue
+				}
+				if tx.From == blockchain.FaucetAddress || validSet[tx.Hash] {
+					good = append(good, tx)
+				}
+			}
+			if len(invalid) > 0 || (err != nil && !res.Valid) {
+				msg := "L1 verification failed"
+				if err != nil {
+					msg = err.Error()
+				} else if res.Error != "" {
+					msg = res.Error
+				}
+				return l1ValidateOutcome{
+					Err:           fmt.Errorf("%s", msg),
+					InvalidHashes: invalid,
+					ValidTxs:      good,
+				}
+			}
+			return l1ValidateOutcome{OK: true, ValidTxs: good}
 		}
-		return true, nil
+		if err != nil {
+			// Fallback: parse hash from "L1 verification failed for tx <hash>"
+			if hash := extractFailedTxHash(err.Error()); hash != "" {
+				return l1ValidateOutcome{
+					Err:           err,
+					InvalidHashes: []string{hash},
+				}
+			}
+			return l1ValidateOutcome{Err: err}
+		}
+		return l1ValidateOutcome{OK: true, ValidTxs: txs}
 	}
 	for _, tx := range txs {
 		if tx == nil || tx.From == blockchain.FaucetAddress {
@@ -98,13 +169,35 @@ func (h *Handler) validateTxsForL1(txs []*blockchain.Transaction) (bool, error) 
 		}
 		coreJSON, ok := txToCoreJSON(tx)
 		if !ok {
-			return false, fmt.Errorf("transaction %s not Core-compatible", tx.Hash)
+			return l1ValidateOutcome{
+				Err:           fmt.Errorf("transaction %s not Core-compatible", tx.Hash),
+				InvalidHashes: []string{tx.Hash},
+			}
 		}
 		if _, err := ledger.ValidateTx(coreJSON); err != nil {
-			return false, err
+			return l1ValidateOutcome{
+				Err:           err,
+				InvalidHashes: []string{tx.Hash},
+			}
 		}
 	}
-	return true, nil
+	return l1ValidateOutcome{OK: true, ValidTxs: txs}
+}
+
+func extractFailedTxHash(msg string) string {
+	const prefix = "L1 verification failed for tx "
+	idx := strings.Index(msg, prefix)
+	if idx < 0 {
+		return ""
+	}
+	hash := strings.TrimSpace(msg[idx+len(prefix):])
+	if i := strings.IndexAny(hash, " \t\n\r,;"); i >= 0 {
+		hash = hash[:i]
+	}
+	if len(hash) < 16 {
+		return ""
+	}
+	return hash
 }
 
 func (h *Handler) assembleBlockHeader(blockNumber int64, txs []*blockchain.Transaction, producerNodeID string, timestamp int64) (*core.BlockHeader, error) {
@@ -176,9 +269,9 @@ func (h *Handler) submitL1Vote(blockId, proposerNodeId string, txCount int, txHa
 		if !ok || len(txs) == 0 {
 			continue
 		}
-		valid, err := h.validateTxsForL1(txs)
-		if err != nil || !valid {
-			logger.Info("L1 proposal validation failed from %s: %v", shortId(proposerNodeId), err)
+		outcome := h.validateTxsForL1(txs)
+		if !outcome.OK {
+			logger.Info("L1 proposal validation failed from %s: %v", shortId(proposerNodeId), outcome.Err)
 			yes = false
 			resolved = true
 			break
@@ -213,9 +306,9 @@ func (h *Handler) submitL2Vote(blockId, proposerNodeId string, txHashes []string
 		if len(pending) == 0 {
 			continue
 		}
-		valid, err := h.validateTxsForL1(pending)
-		if err != nil || !valid {
-			logger.Info("L2 block validation failed from %s: %v", shortId(proposerNodeId), err)
+		outcome := h.validateTxsForL1(pending)
+		if !outcome.OK {
+			logger.Info("L2 block validation failed from %s: %v", shortId(proposerNodeId), outcome.Err)
 			yes = false
 			resolved = true
 			break
