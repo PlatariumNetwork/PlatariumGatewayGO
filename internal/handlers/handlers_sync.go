@@ -69,17 +69,45 @@ func (h *Handler) initChainPersistence(stateFile string) {
 	if chainFile == "" && stateFile != "" {
 		chainFile = blockchain.ChainFileFromStateFile(stateFile)
 	}
-	if chainFile == "" {
+	if chainFile != "" {
+		if err := h.blockchain.LoadChainFile(chainFile); err != nil {
+			logger.Warn("Chain file load failed (%s): %v", chainFile, err)
+		} else {
+			h.blockchain.SetChainFile(chainFile)
+			head := h.blockchain.HeadBlockNumber()
+			logger.Info("Chain metadata loaded from %s (blocks=%d head=%d)", chainFile, len(h.blockchain.GetBlockHistory()), head)
+			h.rebuildDistributorTotalsFromChain()
+		}
+	}
+	if h.blockchain.RocksEnabled() {
+		h.initRocksFromChainFile(chainFile)
+	}
+}
+
+func (h *Handler) initRocksFromChainFile(chainFile string) {
+	rocks := h.blockchain.RocksStore()
+	if rocks == nil {
 		return
 	}
-	if err := h.blockchain.LoadChainFile(chainFile); err != nil {
-		logger.Warn("Chain file load failed (%s): %v", chainFile, err)
+	head, err := rocks.RocksGetHead()
+	if err != nil {
+		logger.Warn("RocksDB head read failed: %v", err)
 		return
 	}
-	h.blockchain.SetChainFile(chainFile)
-	head := h.blockchain.HeadBlockNumber()
-	logger.Info("Chain loaded from %s (blocks=%d head=%d)", chainFile, len(h.blockchain.GetBlockHistory()), head)
-	h.rebuildDistributorTotalsFromChain()
+	if head == 0 && chainFile != "" {
+		if _, statErr := os.Stat(chainFile); statErr == nil {
+			if err := rocks.MigrateJSONToRocks(chainFile, ""); err != nil {
+				logger.Warn("migrate-json-to-rocks failed: %v", err)
+			} else if head, err = rocks.RocksGetHead(); err == nil {
+				logger.Info("Migrated legacy chain JSON to RocksDB (head=%d)", head)
+			}
+		}
+	}
+	if err := h.blockchain.SyncFromRocksHead(); err != nil {
+		logger.Warn("Sync block counter from RocksDB failed: %v", err)
+	} else if head, err := rocks.RocksGetHead(); err == nil {
+		logger.Info("RocksDB canonical head=%d gatewayHead=%d", head, h.blockchain.HeadBlockNumber())
+	}
 }
 
 func (h *Handler) rebuildDistributorTotalsFromChain() {

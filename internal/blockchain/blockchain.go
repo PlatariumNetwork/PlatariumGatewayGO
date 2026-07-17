@@ -63,6 +63,7 @@ type BlockRecord struct {
 type Blockchain struct {
 	mu                  sync.RWMutex
 	ledger              *core.LedgerService
+	rocks               *core.RocksStoreClient
 	transactions        map[string]*Transaction
 	mempool             []*Transaction
 	pendingBlock        []*Transaction // L1 collected → awaiting L2 confirmation
@@ -99,6 +100,13 @@ func (bc *Blockchain) Ledger() *core.LedgerService {
 	return bc.ledger
 }
 
+// RocksStore returns the attached Core RocksDB client (nil if unavailable).
+func (bc *Blockchain) RocksStore() *core.RocksStoreClient {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.rocks
+}
+
 // Init initializes the blockchain
 func (bc *Blockchain) Init() error {
 	// Initialize with default values
@@ -123,6 +131,11 @@ func (bc *Blockchain) GetBalance(address string) (string, error) {
 
 // GetAccountQuery returns full Core account state for an address.
 func (bc *Blockchain) GetAccountQuery(address string) (*core.AccountQuery, error) {
+	if bc.RocksEnabled() {
+		if q, err := bc.getAccountFromRocks(address); err == nil {
+			return q, nil
+		}
+	}
 	bc.mu.RLock()
 	ledger := bc.ledger
 	bc.mu.RUnlock()
@@ -132,20 +145,23 @@ func (bc *Blockchain) GetAccountQuery(address string) (*core.AccountQuery, error
 	return ledger.Query(address)
 }
 
-// GetTransaction returns a transaction by hash
+// GetTransaction returns a transaction by hash (RocksDB when available, else in-memory index).
 func (bc *Blockchain) GetTransaction(hash string) *Transaction {
 	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-	
-	return bc.transactions[hash]
+	if tx := bc.transactions[hash]; tx != nil {
+		bc.mu.RUnlock()
+		return tx
+	}
+	bc.mu.RUnlock()
+	if bc.RocksEnabled() {
+		return bc.getTransactionFromRocks(hash)
+	}
+	return nil
 }
 
 // GetTransactionsByAddress returns transactions where address is sender or receiver
-// (confirmed index, mempool, and pending block).
+// (confirmed from RocksDB when available, plus mempool and pending block).
 func (bc *Blockchain) GetTransactionsByAddress(address string) []*Transaction {
-	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-
 	seen := make(map[string]bool)
 	out := make([]*Transaction, 0)
 
@@ -159,6 +175,19 @@ func (bc *Blockchain) GetTransactionsByAddress(address string) []*Transaction {
 		seen[tx.Hash] = true
 		out = append(out, tx)
 	}
+
+	if bc.RocksEnabled() {
+		if rocks := bc.rocksClient(); rocks != nil {
+			if hashes, err := rocks.RocksListAddressTxs(address); err == nil {
+				for _, hash := range hashes {
+					appendMatch(bc.getTransactionFromRocks(hash))
+				}
+			}
+		}
+	}
+
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
 
 	for _, tx := range bc.addressTxs[address] {
 		appendMatch(tx)
@@ -599,8 +628,14 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 	return true, nil
 }
 
-// GetAllTransactions returns all transactions in chain (order: oldest first by timestamp)
+// GetAllTransactions returns all confirmed transactions (RocksDB when available).
 func (bc *Blockchain) GetAllTransactions() []*Transaction {
+	if bc.RocksEnabled() {
+		if txs, err := bc.listConfirmedTxsFromRocks(); err == nil && len(txs) > 0 {
+			sortTxsByTimestamp(txs)
+			return txs
+		}
+	}
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 
@@ -608,23 +643,39 @@ func (bc *Blockchain) GetAllTransactions() []*Transaction {
 	for _, tx := range bc.transactions {
 		out = append(out, tx)
 	}
-	// sort by timestamp
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].Timestamp < out[i].Timestamp {
-				out[i], out[j] = out[j], out[i]
+	sortTxsByTimestamp(out)
+	return out
+}
+
+func sortTxsByTimestamp(txs []*Transaction) {
+	for i := 0; i < len(txs); i++ {
+		for j := i + 1; j < len(txs); j++ {
+			if txs[j].Timestamp < txs[i].Timestamp {
+				txs[i], txs[j] = txs[j], txs[i]
 			}
 		}
 	}
-	return out
 }
 
 // TxHashToBlockNumber maps confirmed transaction hashes to their block numbers.
 func (bc *Blockchain) TxHashToBlockNumber() map[string]int64 {
+	out := make(map[string]int64)
+	if bc.RocksEnabled() {
+		if blocks, err := bc.listBlockHistoryFromRocks(); err == nil {
+			for _, block := range blocks {
+				for _, hash := range block.TxHashes {
+					if hash != "" {
+						out[hash] = block.BlockNumber
+					}
+				}
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+	}
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-
-	out := make(map[string]int64)
 	for _, block := range bc.blockHistory {
 		for _, hash := range block.TxHashes {
 			if hash != "" {
@@ -778,29 +829,40 @@ func (bc *Blockchain) ApplyBlockHeader(blockNumber int64, header core.BlockHeade
 // GetBlockHistory returns block records for analytics (with L1/L2 votes when available).
 func (bc *Blockchain) GetBlockHistory() []BlockRecord {
 	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-	
-	out := make([]BlockRecord, len(bc.blockHistory))
-	copy(out, bc.blockHistory)
-	return out
+	if len(bc.blockHistory) > 0 {
+		out := make([]BlockRecord, len(bc.blockHistory))
+		copy(out, bc.blockHistory)
+		bc.mu.RUnlock()
+		return out
+	}
+	bc.mu.RUnlock()
+	if bc.RocksEnabled() {
+		if blocks, err := bc.listBlockHistoryFromRocks(); err == nil {
+			return blocks
+		}
+	}
+	return nil
 }
 
 // GetBlockByNumber returns a copy of the block record for the given block number, or nil if not found.
 func (bc *Blockchain) GetBlockByNumber(blockNumber int64) *BlockRecord {
 	bc.mu.RLock()
-	defer bc.mu.RUnlock()
 	for i := range bc.blockHistory {
 		if bc.blockHistory[i].BlockNumber == blockNumber {
 			b := bc.blockHistory[i]
-			// Return pointer to heap copy so caller keeps valid reference
 			out := new(BlockRecord)
 			*out = b
 			if len(b.TxHashes) > 0 {
 				out.TxHashes = make([]string, len(b.TxHashes))
 				copy(out.TxHashes, b.TxHashes)
 			}
+			bc.mu.RUnlock()
 			return out
 		}
+	}
+	bc.mu.RUnlock()
+	if bc.RocksEnabled() {
+		return bc.getBlockFromRocks(blockNumber)
 	}
 	return nil
 }

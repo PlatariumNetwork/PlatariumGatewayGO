@@ -86,6 +86,7 @@ func (bc *Blockchain) ChainFilePath() string {
 }
 
 // PersistChainSnapshot writes indexed transactions and block history to disk.
+// No-op when Core RocksDB is the canonical store (see PLATARIUM_ROCKSDB_PATH).
 func (bc *Blockchain) PersistChainSnapshot() error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -95,6 +96,10 @@ func (bc *Blockchain) PersistChainSnapshot() error {
 // persistChain writes the chain snapshot when a chain file is configured.
 // Caller must hold bc.mu (write lock).
 func (bc *Blockchain) persistChain() error {
+	// Canonical chain data lives in Core RocksDB; JSON chain files are legacy/migration only.
+	if bc.rocks != nil && bc.rocks.Enabled() {
+		return nil
+	}
 	path := bc.chainFile
 	if path == "" {
 		return nil

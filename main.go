@@ -144,9 +144,8 @@ func main() {
 		log.Fatalf("Failed to create handler: %v", err)
 	}
 	if handlers.AutoBlockEnabled(*testnet) {
-		l1Every, l2Every := handlers.AutoBlockIntervals()
-		handler.StartAutoBlockWorker(l1Every, l2Every)
-		log.Printf("[AUTO-BLOCK] Enabled: L1 collect every %v when mempool non-empty; L2 confirm every %v when pending block exists", l1Every, l2Every)
+		handler.StartAutoBlockWorker()
+		log.Printf("[AUTO-BLOCK] Gas-triggered block worker enabled (testnet consensus)")
 	}
 
 	// Static file server for web UI

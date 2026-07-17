@@ -119,11 +119,12 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 		log.Println("[INFO] Rust Core initialized successfully")
 	}
 
+	stateFile := os.Getenv("PLATARIUM_STATE_FILE")
+	if stateFile == "" {
+		stateFile = "data/core-state.json"
+	}
+
 	if rustCore != nil {
-		stateFile := os.Getenv("PLATARIUM_STATE_FILE")
-		if stateFile == "" {
-			stateFile = "data/core-state.json"
-		}
 		ledger, lerr := core.NewLedgerService(rustCore, stateFile, testnet)
 		if lerr != nil {
 			if testnet {
@@ -136,9 +137,14 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 		}
 	}
 
-	stateFile := os.Getenv("PLATARIUM_STATE_FILE")
-	if stateFile == "" {
-		stateFile = "data/core-state.json"
+	if rustCore != nil {
+		dbPath := core.ResolveRocksDBPath(stateFile)
+		if rocks, rerr := core.NewRocksStoreClient(rustCore, dbPath); rerr != nil {
+			log.Printf("[WARN] Core RocksDB client not initialized: %v", rerr)
+		} else {
+			bc.SetRocksStore(rocks)
+			log.Printf("[INFO] Core RocksDB path: %s (canonical chain reads/commits)", dbPath)
+		}
 	}
 
 	h := &Handler{
@@ -162,7 +168,7 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 	} else {
 		log.Printf("[INFO] PLATARIUM_OPERATOR_WALLET unset — validation fees/XP will not credit a contributor wallet")
 	}
-	if bc.Ledger() != nil {
+	if bc.Ledger() != nil || bc.RocksEnabled() {
 		h.initChainPersistence(stateFile)
 	}
 	faucetStore, ferr := initFaucetCooldownStore()
@@ -211,7 +217,7 @@ func (h *Handler) onMempoolAdd(txMap map[string]interface{}) {
 	_ = h.blockchain.AddToMempool(tx)
 }
 
-// validateTxForMempool checks Core state applicability before mempool admission.
+// validateTxForMempool delegates all consensus admission rules to PlatariumCore.
 func (h *Handler) validateTxForMempool(tx *blockchain.Transaction) error {
 	if tx == nil {
 		return fmt.Errorf("nil transaction")
@@ -219,31 +225,39 @@ func (h *Handler) validateTxForMempool(tx *blockchain.Transaction) error {
 	if tx.From == blockchain.FaucetAddress {
 		return nil
 	}
-	ledger := h.blockchain.Ledger()
-	if ledger == nil {
-		if h.testnet {
-			return fmt.Errorf("core ledger unavailable")
-		}
-		if tx.SigMain != "" && h.rustCore != nil {
-			coreJSON, ok := txToCoreJSON(tx)
-			if ok {
-				valid, err := h.rustCore.ValidateTransaction(coreJSON)
-				if err != nil || !valid {
-					return fmt.Errorf("validate-tx: %v", err)
-				}
-			}
-		}
-		return nil
+	if h.rustCore == nil {
+		return fmt.Errorf("rust core unavailable")
 	}
-	coreJSON, ok := txToCoreJSON(tx)
+	if h.blockchain.Ledger() == nil {
+		return fmt.Errorf("core ledger unavailable")
+	}
+	return h.validateTxViaCore(tx)
+}
+
+func (h *Handler) validateTxViaCore(tx *blockchain.Transaction) error {
+	if h.rustCore == nil {
+		return fmt.Errorf("rust core unavailable")
+	}
+	coreJSON, ok := tx.ToCoreJSON()
 	if !ok {
-		if h.testnet {
-			return fmt.Errorf("transaction missing Core signature fields")
-		}
-		return nil
+		return fmt.Errorf("transaction missing Core signature fields")
 	}
-	_, err := ledger.ValidateTx(coreJSON)
-	return err
+	snap, err := h.blockchain.MempoolSnapshotJSON()
+	if err != nil {
+		return err
+	}
+	stateFile := h.blockchain.Ledger().StateFilePath()
+	res, err := h.rustCore.MempoolAdmit(stateFile, coreJSON, snap)
+	if err != nil {
+		return err
+	}
+	if !res.Accepted {
+		if res.Error != "" {
+			return fmt.Errorf("%s", res.Error)
+		}
+		return fmt.Errorf("mempool admit rejected")
+	}
+	return nil
 }
 
 func (h *Handler) indexMempoolAdmission(tx *blockchain.Transaction) error {
@@ -1723,6 +1737,14 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 	h.nodeEarnedMu.Unlock()
 	burned, treasury := h.distributor.Totals()
 	cfg := h.distributor.GetConfig()
+	blockSnap, blockSnapErr := h.coreBlockProposalStatus()
+	var blockProposal interface{} = blockSnap
+	if blockSnapErr != nil {
+		blockProposal = map[string]interface{}{
+			"available": false,
+			"error":     blockSnapErr.Error(),
+		}
+	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"chainTxCount":     st.ChainTxCount,
 		"mempoolCount":     st.MempoolCount,
@@ -1735,6 +1757,7 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 		"totalTreasury":    treasury,
 		"operatorWallet":   h.operatorWallet,
 		"networkId":        h.networkID,
+		"blockProposal":    blockProposal,
 		"rewardConfig": map[string]interface{}{
 			"burnPct":     cfg.BurnPct,
 			"treasuryPct": cfg.TreasuryPct,
@@ -1959,7 +1982,7 @@ func (h *Handler) L1CollectBlock(w http.ResponseWriter, r *http.Request) {
 	// If we received a forward with ourselves as selected, we are the proposer - run L1 without re-selecting (stops chain).
 	if selectedHeader == myId {
 		logger.Info("L1 running as selected proposer (forwarded to us)")
-		h.l1CollectBlockRun(w, r, 0)
+		h.l1CollectBlockRun(w, r)
 		return
 	}
 	mempool := h.blockchain.GetMempool()
@@ -1991,28 +2014,23 @@ func (h *Handler) L1CollectBlock(w http.ResponseWriter, r *http.Request) {
 			logger.Warn("L1 selected %s but no RestURL, running locally", shortId(selected))
 		}
 	}
-	h.l1CollectBlockRun(w, r, 0)
+	h.l1CollectBlockRun(w, r)
 }
 
-// l1CollectBlockRun performs the L1 vote round and block collect (assumes mempool check already done or we are the selected node).
-// collectLimit <= 0 collects the full pruned mempool; otherwise only the first N txs (FIFO).
-func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request, collectLimit int) {
+// l1CollectBlockRun performs the L1 vote round and gas-capped block collect.
+func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	h.pruneMempoolBeforeL1()
-	mempool := h.blockchain.GetMempool()
-	txCount := len(mempool)
-	if txCount == 0 {
-		logger.Warn("L1 collect rejected: mempool empty")
+	selected := h.selectTxsForBlockCollect()
+	if len(selected) == 0 {
+		logger.Warn("L1 collect rejected: no packable transactions")
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
-			"error":   "mempool empty",
-			"hint":    "Send transactions first (POST /api/send-tx or /api/demo-sendtx), then call L1 collect",
+			"error": "no packable transactions",
+			"hint":  "Mempool may be empty, over block gas cap, or nonce order prevents packing",
 		})
 		return
 	}
-	collect := mempool
-	if collectLimit > 0 && collectLimit < len(mempool) {
-		collect = mempool[:collectLimit]
-	}
-	txCount = len(collect)
+	collect := selected
+	txCount := len(collect)
 	myId := h.nodesManager.GetNodeID()
 	connected := h.nodesManager.GetConnectedNodes()
 	candidates := make([]string, 0, 1+len(connected))
@@ -2270,7 +2288,7 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request, coll
 	h.pendingL1Mu.Lock()
 	h.pendingL1Beneficiary = myId
 	h.pendingL1Mu.Unlock()
-	moved := h.blockchain.L1CollectBlockLimit(collectLimit)
+	moved := h.blockchain.L1CollectSelected(selected)
 	logger.Info("L1 block collected proposer=%s moved=%d", shortId(myId), len(moved))
 	pendingBlockMaps := make([]map[string]interface{}, 0, len(moved))
 	for _, tx := range moved {
@@ -2617,6 +2635,9 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		block.StateRoot = header.StateRoot
 		block.PreviousHash = header.PreviousHash
 		block.ProducerNodeID = myId
+		if err := h.commitBlockToRocks(block, moved, header.StateRoot); err != nil {
+			logger.Warn("RocksDB commit after L2 confirm failed: %v", err)
+		}
 	} else {
 		logger.Warn("assemble-block failed after L2 confirm: %v", hdrErr)
 	}
@@ -2753,6 +2774,9 @@ func (h *Handler) ConfirmBlock(w http.ResponseWriter, r *http.Request) {
 		block.MerkleRoot = header.MerkleRoot
 		block.StateRoot = header.StateRoot
 		block.PreviousHash = header.PreviousHash
+		if err := h.commitBlockToRocks(block, moved, header.StateRoot); err != nil {
+			logger.Warn("RocksDB commit after legacy confirm failed: %v", err)
+		}
 	}
 	if block.TotalFees > 0 {
 		h.distributor.ApplyBlock(block.TotalFees)
@@ -2923,6 +2947,7 @@ func (h *Handler) GetNodeRatings(w http.ResponseWriter, r *http.Request) {
 	for _, s := range all {
 		list = append(list, map[string]interface{}{
 			"nodeId":          s.NodeID,
+			"status":          s.Status,
 			"uptimeScore":     s.UptimeScore,
 			"latencyScore":    s.LatencyScore,
 			"missedVotes":     s.MissedVotes,

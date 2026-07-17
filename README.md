@@ -76,14 +76,17 @@ In testnet mode:
 
 ### Core state file
 
-The gateway persists authoritative balances in a JSON state file managed by `platarium-cli`:
+The gateway persists authoritative balances in a JSON state file managed by `platarium-cli` (mempool admission + apply during confirmation):
 
 | Setting | Description |
 |---------|-------------|
 | `-state-file PATH` | CLI flag; sets `PLATARIUM_STATE_FILE` for this process |
-| `PLATARIUM_STATE_FILE` | Path to Core state JSON (default: `data/core-state.json`) |
-| `PLATARIUM_CHAIN_FILE` | Path to chain history JSON (default: derived from state file, e.g. `state-node0.json` → `chain-node0.json`) |
+| `PLATARIUM_STATE_FILE` | Path to Core state JSON (default: `data/core-state.json`) — **not canonical** for confirmed explorer reads when RocksDB is populated |
+| `PLATARIUM_CHAIN_FILE` | Legacy chain history JSON (default: derived from state file). **Not written** when RocksDB is enabled; used for one-time `migrate-json-to-rocks` |
+| `PLATARIUM_ROCKSDB_PATH` | Core RocksDB directory (default: `{state_dir}/rocksdb`). Canonical TX/block/account store |
 | `PLATARIUM_CLI_PATH` | Path to `platarium-cli` binary (auto-detected from `../PlatariumCore/target/release/`) |
+
+See [docs/rocksdb-thin-reads.md](docs/rocksdb-thin-reads.md) for thin read and commit behavior.
 
 Example (single-node testnet with isolated state):
 
@@ -120,7 +123,8 @@ If Core CLI or state file is unavailable, balance/faucet endpoints return **503 
 
 | Setting | Description |
 |---------|-------------|
-| `PLATARIUM_CHAIN_FILE` | JSON file for confirmed blocks + transaction index (auto-derived from state file if unset) |
+| `PLATARIUM_CHAIN_FILE` | Legacy JSON for migration / vote metadata (not canonical when RocksDB enabled) |
+| `PLATARIUM_ROCKSDB_PATH` | Canonical chain store (Core RocksDB) |
 | `-chain-file PATH` | CLI flag; sets `PLATARIUM_CHAIN_FILE` |
 | Peer sync | On connect, nodes exchange `sync:request` / `sync:response` with block payloads (same shape as `block_confirmed`) |
 
