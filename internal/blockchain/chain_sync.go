@@ -21,12 +21,19 @@ func (bc *Blockchain) HeadBlockNumber() int64 {
 // HeadBlock returns a copy of the latest block record, or nil if empty.
 func (bc *Blockchain) HeadBlock() *BlockRecord {
 	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-	if len(bc.blockHistory) == 0 {
-		return nil
+	if len(bc.blockHistory) > 0 {
+		out := bc.blockHistory[len(bc.blockHistory)-1]
+		bc.mu.RUnlock()
+		return &out
 	}
-	out := bc.blockHistory[len(bc.blockHistory)-1]
-	return &out
+	bc.mu.RUnlock()
+
+	if rocksHead, ok := bc.headBlockNumberFromRocks(); ok && rocksHead >= 0 {
+		if b := bc.getBlockFromRocks(rocksHead); b != nil {
+			return b
+		}
+	}
+	return nil
 }
 
 // ExportBlocksForSync returns block_confirmed-style payloads for blocks with number >= fromBlock.

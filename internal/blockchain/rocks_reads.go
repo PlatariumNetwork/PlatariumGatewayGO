@@ -25,7 +25,7 @@ func (bc *Blockchain) SetRocksStore(rocks *core.RocksStoreClient) {
 	bc.rocks = rocks
 }
 
-// SyncFromRocksHead sets blockCounter from Core head when RocksDB is canonical.
+// SyncFromRocksHead sets blockCounter and hydrates in-memory blockHistory from Core RocksDB.
 func (bc *Blockchain) SyncFromRocksHead() error {
 	rocks := bc.rocksClient()
 	if rocks == nil || !rocks.Enabled() {
@@ -35,9 +35,18 @@ func (bc *Blockchain) SyncFromRocksHead() error {
 	if err != nil {
 		return err
 	}
+	history, err := bc.listBlockHistoryFromRocks()
+	if err != nil {
+		return err
+	}
 	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	// Next gateway block number equals Rocks head (0-based next after last imported height).
+	// Rocks height H ↔ gateway blockNumber H-1; after head H, next BlockNumber is H.
 	bc.blockCounter = int64(head)
-	bc.mu.Unlock()
+	if len(history) > 0 {
+		bc.blockHistory = history
+	}
 	return nil
 }
 
