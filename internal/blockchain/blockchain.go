@@ -265,9 +265,23 @@ func (bc *Blockchain) AddToMempool(tx *Transaction) error {
 	if bc.confirmedHashes[tx.Hash] {
 		return nil
 	}
+	for _, t := range bc.pendingBlock {
+		if t == nil {
+			continue
+		}
+		if t.Hash == tx.Hash {
+			return nil
+		}
+		if t.From == tx.From && t.Nonce == tx.Nonce {
+			return fmt.Errorf("nonce %d for %s is already in L1 pending", tx.Nonce, tx.From)
+		}
+	}
 	for _, t := range bc.mempool {
 		if t.Hash == tx.Hash {
 			return nil
+		}
+		if t.From == tx.From && t.Nonce == tx.Nonce {
+			return fmt.Errorf("nonce %d for %s is already in mempool", tx.Nonce, tx.From)
 		}
 	}
 	bc.mempool = append(bc.mempool, tx)

@@ -8,8 +8,24 @@ import (
 func (bc *Blockchain) MempoolSnapshotJSON() (string, error) {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	entries := make([]map[string]interface{}, 0, len(bc.mempool))
-	for i, tx := range bc.mempool {
+	return transactionSnapshotJSON(bc.mempool)
+}
+
+// AdmissionSnapshotJSON includes both L1-pending and mempool transactions.
+// A tx moved mempool -> pending has not changed chain state yet, so excluding it
+// lets mempool_admit accept a second tx with the same sender+nonce.
+func (bc *Blockchain) AdmissionSnapshotJSON() (string, error) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	txs := make([]*Transaction, 0, len(bc.pendingBlock)+len(bc.mempool))
+	txs = append(txs, bc.pendingBlock...)
+	txs = append(txs, bc.mempool...)
+	return transactionSnapshotJSON(txs)
+}
+
+func transactionSnapshotJSON(txs []*Transaction) (string, error) {
+	entries := make([]map[string]interface{}, 0, len(txs))
+	for i, tx := range txs {
 		if tx == nil {
 			continue
 		}
