@@ -2689,17 +2689,11 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 	moved, block, err := h.blockchain.L2ConfirmBlock()
 	if err != nil {
 		logger.Warn("L2 confirm apply failed: %v", err)
-		drop := []string{}
-		if hash := extractApplyTxHash([]byte(err.Error())); hash != "" {
-			drop = []string{hash}
-		} else if hash := extractFailedTxHash(err.Error()); hash != "" {
-			drop = []string{hash}
-		}
-		// If we cannot identify the poison tx, return the whole pending pack to
-		// the mempool (drop=nil). Discarding unknown packs made accepted txs
-		// vanish from explorer with no blockNumber.
-		returned, dropped := h.blockchain.AbandonPendingBlock(drop)
-		logger.Warn("L2 confirm recovery: returned=%d dropped=%d drop=%v", returned, dropped, drop)
+		// Never discard on apply failure: state was rolled back, so the whole
+		// pending pack is still valid against pre-apply state. Permanent poison
+		// is removed on the next tick by validateTxsForL1 / mempool prune.
+		returned, dropped := h.blockchain.AbandonPendingBlock(nil)
+		logger.Warn("L2 confirm recovery: returned=%d dropped=%d (requeue all after apply fail)", returned, dropped)
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

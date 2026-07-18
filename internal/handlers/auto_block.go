@@ -86,15 +86,10 @@ func (h *Handler) autoBlockTick() {
 		h.L2ConfirmBlock(w, autoBlockPOST())
 		if w.status >= 400 && w.status != 0 {
 			logger.Warn("Auto L2 confirm finished with HTTP %d body=%s", w.status, string(w.body))
-			// Handler already abandons on apply failure; clear any leftover pending.
+			// Handler requeues pending on apply failure; clear any leftover safely.
 			if len(h.blockchain.GetPendingBlock()) > 0 {
-				failHash := extractApplyTxHash(w.body)
-				var drop []string
-				if failHash != "" {
-					drop = []string{failHash}
-				}
-				returned, dropped := h.blockchain.AbandonPendingBlock(drop)
-				logger.Warn("Auto L2 recovery: drop=%s returned=%d dropped=%d", shortId(failHash), returned, dropped)
+				returned, dropped := h.blockchain.AbandonPendingBlock(nil)
+				logger.Warn("Auto L2 recovery: returned=%d dropped=%d", returned, dropped)
 			}
 		}
 		return
