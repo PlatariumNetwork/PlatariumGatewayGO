@@ -120,10 +120,10 @@ func (h *Handler) hydrateExplorerIndexFromRocksIfNeeded() {
 	}
 	expected := h.blockchain.ExpectedConfirmedTxCount()
 	indexed := h.blockchain.IndexedTransactionCount()
-	if expected <= 0 || indexed >= expected {
+	if expected <= 0 || indexed == expected {
 		return
 	}
-	logger.Info("Explorer index incomplete (%d/%d txs) — hydrating from RocksDB…", indexed, expected)
+	logger.Info("Explorer index differs from canonical chain (%d indexed/%d expected) — hydrating from RocksDB…", indexed, expected)
 	n, err := h.blockchain.HydrateExplorerIndexFromRocks()
 	if err != nil {
 		logger.Warn("Explorer index hydrate from RocksDB failed: %v", err)
