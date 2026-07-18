@@ -243,7 +243,9 @@ func (h *Handler) validateTxViaCore(tx *blockchain.Transaction) error {
 	if !ok {
 		return fmt.Errorf("transaction missing Core signature fields")
 	}
-	snap, err := h.blockchain.MempoolSnapshotJSON()
+	// Admission must reserve nonces/balances already moved into the L1-pending
+	// block; they are absent from the normal mempool snapshot until L2 confirms.
+	snap, err := h.blockchain.AdmissionSnapshotJSON()
 	if err != nil {
 		return err
 	}
