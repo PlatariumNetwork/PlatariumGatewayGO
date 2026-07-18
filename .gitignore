@@ -30,6 +30,9 @@ go.work
 logs/
 log/
 
+# Runtime data
+data/
+
 # OS
 .DS_Store
 Thumbs.db

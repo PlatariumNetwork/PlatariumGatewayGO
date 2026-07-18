@@ -83,6 +83,8 @@ func (c *RPCClient) Call(method string, params map[string]interface{}) (string, 
 	}
 
 	scanner := bufio.NewScanner(conn)
+	// Large mempool / L1 verify JSON can exceed the default 64KiB token limit.
+	scanner.Buffer(make([]byte, 0, 1024*1024), 32*1024*1024)
 	if !scanner.Scan() {
 		return "", fmt.Errorf("core rpc: empty response")
 	}

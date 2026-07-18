@@ -87,10 +87,17 @@ func normalizeSignatureHex(signatureHex string) string {
 }
 
 // Execute runs a platarium-cli command (subprocess) or JSON-RPC call when PLATARIUM_CORE_MODE=rpc.
+// Oversized JSON argv values are spilled to temp files (@path) so CLI mode does not hit ARG_MAX.
 func (rc *RustCore) Execute(args []string) (string, error) {
 	if rc.rpcClient != nil {
 		return rc.rpcClient.ExecuteRPC(args)
 	}
+	args, cleanup, err := spillLargeCLIArgs(args)
+	if err != nil {
+		return "", fmt.Errorf("spill large CLI args: %w", err)
+	}
+	defer cleanup()
+
 	cmd := exec.Command(rc.binaryPath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
