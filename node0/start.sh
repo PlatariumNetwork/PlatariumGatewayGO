@@ -21,6 +21,8 @@ export NODE_HOST="${NODE_HOST:-31.172.71.182}"
 export PLATARIUM_STATE_FILE="$ROOT/data/state.json"
 export PLATARIUM_CHAIN_FILE="$ROOT/data/chain.json"
 export PLATARIUM_ROCKSDB_PATH="$ROOT/data/rocksdb"
+# Sole block producer for melancholy-testnet.
+export PLATARIUM_AUTO_BLOCK="${PLATARIUM_AUTO_BLOCK:-1}"
 
 mkdir -p data/rocksdb log
 

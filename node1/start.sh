@@ -22,6 +22,9 @@ export PLATARIUM_STATE_FILE="$ROOT/data/state.json"
 export PLATARIUM_CHAIN_FILE="$ROOT/data/chain.json"
 export PLATARIUM_ROCKSDB_PATH="$ROOT/data/rocksdb"
 export PEERS="${PEERS:-[\"ws://127.0.0.1:1813\"]}"
+# Follower only: node0 is the sole L1/L2 block producer. Dual auto-block races
+# drop the same mempool txs on both nodes and makes explorer txs "disappear".
+export PLATARIUM_AUTO_BLOCK=0
 
 mkdir -p data/rocksdb log
 
