@@ -757,14 +757,14 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 	return true, nil
 }
 
-// GetAllTransactions returns all confirmed transactions (RocksDB when available).
+// GetAllTransactions returns a stable snapshot of the in-memory transaction index.
+//
+// Do not rebuild this list from RocksDB here. The Rocks adapter invokes the Core
+// CLI once per block and once per transaction; transient failures during that
+// multi-call scan previously produced successful but incomplete explorer
+// responses. The in-memory index is updated on admission/confirmation, restored
+// from chain storage at startup, and is also the source of ChainTxCount.
 func (bc *Blockchain) GetAllTransactions() []*Transaction {
-	if bc.RocksEnabled() {
-		if txs, err := bc.listConfirmedTxsFromRocks(); err == nil && len(txs) > 0 {
-			sortTxsByTimestamp(txs)
-			return txs
-		}
-	}
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 
