@@ -50,6 +50,57 @@ func (bc *Blockchain) SyncFromRocksHead() error {
 	return nil
 }
 
+// ExpectedConfirmedTxCount counts unique tx hashes recorded in blockHistory.
+func (bc *Blockchain) ExpectedConfirmedTxCount() int {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	seen := make(map[string]bool)
+	for _, block := range bc.blockHistory {
+		for _, hash := range block.TxHashes {
+			if hash != "" {
+				seen[hash] = true
+			}
+		}
+	}
+	return len(seen)
+}
+
+// IndexedTransactionCount returns the size of the in-memory explorer tx index.
+func (bc *Blockchain) IndexedTransactionCount() int {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return len(bc.transactions)
+}
+
+// HydrateExplorerIndexFromRocks rebuilds the in-memory explorer index from RocksDB.
+// Call once at startup when chain.json is missing or lagging behind Rocks head.
+func (bc *Blockchain) HydrateExplorerIndexFromRocks() (int, error) {
+	txs, err := bc.listConfirmedTxsFromRocks()
+	if err != nil {
+		return 0, err
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	bc.transactions = make(map[string]*Transaction, len(txs))
+	bc.addressTxs = make(map[string][]*Transaction)
+	bc.confirmedHashes = make(map[string]bool, len(txs))
+	for _, tx := range txs {
+		if tx == nil || tx.Hash == "" {
+			continue
+		}
+		bc.transactions[tx.Hash] = tx
+		bc.confirmedHashes[tx.Hash] = true
+		bc.lastTx = tx
+		if tx.From != "" {
+			bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
+		}
+		if tx.To != "" && tx.To != tx.From {
+			bc.addressTxs[tx.To] = append(bc.addressTxs[tx.To], tx)
+		}
+	}
+	return len(bc.transactions), nil
+}
+
 func txFromCoreJSON(raw string) (*Transaction, error) {
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
