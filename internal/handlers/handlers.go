@@ -1677,6 +1677,7 @@ func (h *Handler) GetAllTransactions(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) buildExplorerTransactionList() []map[string]interface{} {
 	blockByHash := h.blockchain.TxHashToBlockNumber()
+	rocksCanonical := h.blockchain.RocksEnabled()
 	blockTs := make(map[int64]int64)
 	for _, b := range h.blockchain.GetBlockHistory() {
 		if b.Timestamp > 0 {
@@ -1686,16 +1687,21 @@ func (h *Handler) buildExplorerTransactionList() []map[string]interface{} {
 	seen := make(map[string]bool)
 	out := make([]map[string]interface{}, 0)
 
-	appendTx := func(tx *blockchain.Transaction) {
+	appendTx := func(tx *blockchain.Transaction, allowUnconfirmed bool) {
 		if tx == nil || tx.Hash == "" || seen[tx.Hash] {
 			return
 		}
-		seen[tx.Hash] = true
+		bn, confirmed := blockByHash[tx.Hash]
+		if rocksCanonical && !confirmed && !allowUnconfirmed {
+			// Ignore stale chain.json/fork entries that are absent from canonical RocksDB.
+			return
+		}
 		m := txToMap(tx)
 		if m == nil {
 			return
 		}
-		if bn, ok := blockByHash[tx.Hash]; ok {
+		seen[tx.Hash] = true
+		if confirmed {
 			m["blockNumber"] = bn
 			m["status"] = "confirmed"
 			if txMapTimestamp(m) <= 0 {
@@ -1703,7 +1709,7 @@ func (h *Handler) buildExplorerTransactionList() []map[string]interface{} {
 					m["timestamp"] = ts
 				}
 			}
-		} else if tx.BlockNumber > 0 {
+		} else if !rocksCanonical && tx.BlockNumber > 0 {
 			m["blockNumber"] = tx.BlockNumber
 			m["status"] = "confirmed"
 			if txMapTimestamp(m) <= 0 {
@@ -1711,18 +1717,22 @@ func (h *Handler) buildExplorerTransactionList() []map[string]interface{} {
 					m["timestamp"] = ts
 				}
 			}
+		} else {
+			// Pending/mempool records must never inherit stale confirmation metadata.
+			delete(m, "blockNumber")
+			delete(m, "status")
 		}
 		out = append(out, m)
 	}
 
 	for _, tx := range h.blockchain.GetAllTransactions() {
-		appendTx(tx)
+		appendTx(tx, false)
 	}
 	for _, tx := range h.blockchain.GetPendingBlock() {
-		appendTx(tx)
+		appendTx(tx, true)
 	}
 	for _, tx := range h.blockchain.GetMempool() {
-		appendTx(tx)
+		appendTx(tx, true)
 	}
 
 	sort.Slice(out, func(i, j int) bool {

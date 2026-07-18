@@ -16,24 +16,24 @@ import (
 // Transaction represents a blockchain transaction.
 // Core-signed TX: set SigMain, SigDerived, Asset, AmountUplp, FeeUplp (Value/Fee kept for display).
 type Transaction struct {
-	Hash            string   `json:"hash"`
-	From            string   `json:"from"`
-	To              string   `json:"to"`
-	Value           string   `json:"value"`
-	Fee             string   `json:"fee"`
-	Nonce           int      `json:"nonce"`
-	Timestamp       int64    `json:"timestamp"`
-	Type            string   `json:"type"`
-	AssetType       string   `json:"assetType"`
-	ContractAddress string   `json:"contractAddress,omitempty"`
+	Hash            string `json:"hash"`
+	From            string `json:"from"`
+	To              string `json:"to"`
+	Value           string `json:"value"`
+	Fee             string `json:"fee"`
+	Nonce           int    `json:"nonce"`
+	Timestamp       int64  `json:"timestamp"`
+	Type            string `json:"type"`
+	AssetType       string `json:"assetType"`
+	ContractAddress string `json:"contractAddress,omitempty"`
 	// Core format (for real validation and signed demo TX)
-	SigMain    string   `json:"sig_main,omitempty"`
-	SigDerived string   `json:"sig_derived,omitempty"`
-	PubMain    string   `json:"pub_main,omitempty"`
-	PubDerived string   `json:"pub_derived,omitempty"`
-	Asset     string   `json:"asset,omitempty"`      // "PLP" or "Token:XXX"
-	AmountUplp uint64  `json:"amount,omitempty"`     // amount in minimal units
-	FeeUplp   uint64  `json:"fee_uplp,omitempty"`   // fee in μPLP
+	SigMain     string   `json:"sig_main,omitempty"`
+	SigDerived  string   `json:"sig_derived,omitempty"`
+	PubMain     string   `json:"pub_main,omitempty"`
+	PubDerived  string   `json:"pub_derived,omitempty"`
+	Asset       string   `json:"asset,omitempty"`    // "PLP" or "Token:XXX"
+	AmountUplp  uint64   `json:"amount,omitempty"`   // amount in minimal units
+	FeeUplp     uint64   `json:"fee_uplp,omitempty"` // fee in μPLP
 	Reads       []string `json:"reads,omitempty"`
 	Writes      []string `json:"writes,omitempty"`
 	BlockNumber int64    `json:"blockNumber,omitempty"`
@@ -41,42 +41,42 @@ type Transaction struct {
 
 // BlockRecord is a record for analytics (block number from 0, time, tx count, fees, L1/L2 votes, duration, miners).
 type BlockRecord struct {
-	BlockNumber           int64          `json:"blockNumber"`
-	Timestamp             int64          `json:"timestamp"`
-	TxHashes              []string       `json:"txHashes"`
-	TxCount               int            `json:"txCount"`
-	TotalFees             int64          `json:"totalFees"`
-	BlockHash             string         `json:"blockHash,omitempty"`
-	MerkleRoot            string         `json:"merkleRoot,omitempty"`
-	StateRoot             string         `json:"stateRoot,omitempty"`
-	PreviousHash          string         `json:"previousHash,omitempty"`
-	ProducerNodeID        string         `json:"producerNodeId,omitempty"`
-	L1Yes                 int            `json:"l1Yes,omitempty"`
-	L1No                  int            `json:"l1No,omitempty"`
-	L2Yes                 int            `json:"l2Yes,omitempty"`
-	L2No                  int            `json:"l2No,omitempty"`
-	DurationMs            int            `json:"durationMs,omitempty"`
-	L1BeneficiaryNodeId   string         `json:"l1BeneficiaryNodeId,omitempty"`
-	L2ConfirmerNodeId     string         `json:"l2ConfirmerNodeId,omitempty"`
-	L1Votes               map[string]bool `json:"l1Votes,omitempty"` // nodeId -> voted yes (L1 consensus log)
-	L2Votes               map[string]bool `json:"l2Votes,omitempty"` // nodeId -> voted yes (L2 consensus log)
+	BlockNumber         int64           `json:"blockNumber"`
+	Timestamp           int64           `json:"timestamp"`
+	TxHashes            []string        `json:"txHashes"`
+	TxCount             int             `json:"txCount"`
+	TotalFees           int64           `json:"totalFees"`
+	BlockHash           string          `json:"blockHash,omitempty"`
+	MerkleRoot          string          `json:"merkleRoot,omitempty"`
+	StateRoot           string          `json:"stateRoot,omitempty"`
+	PreviousHash        string          `json:"previousHash,omitempty"`
+	ProducerNodeID      string          `json:"producerNodeId,omitempty"`
+	L1Yes               int             `json:"l1Yes,omitempty"`
+	L1No                int             `json:"l1No,omitempty"`
+	L2Yes               int             `json:"l2Yes,omitempty"`
+	L2No                int             `json:"l2No,omitempty"`
+	DurationMs          int             `json:"durationMs,omitempty"`
+	L1BeneficiaryNodeId string          `json:"l1BeneficiaryNodeId,omitempty"`
+	L2ConfirmerNodeId   string          `json:"l2ConfirmerNodeId,omitempty"`
+	L1Votes             map[string]bool `json:"l1Votes,omitempty"` // nodeId -> voted yes (L1 consensus log)
+	L2Votes             map[string]bool `json:"l2Votes,omitempty"` // nodeId -> voted yes (L2 consensus log)
 }
 
 // Blockchain represents the blockchain interface
 type Blockchain struct {
-	mu                  sync.RWMutex
-	ledger              *core.LedgerService
-	rocks               *core.RocksStoreClient
-	transactions        map[string]*Transaction
-	mempool             []*Transaction
-	pendingBlock        []*Transaction // L1 collected → awaiting L2 confirmation
-	addressTxs          map[string][]*Transaction
-	lastTx              *Transaction
-	blockCounter        int64
-	blockHistory        []BlockRecord
-	totalFeesCollected  int64 // total fees from all confirmed TX
-	chainFile           string
-	confirmedHashes     map[string]bool // hashes already in a confirmed block (guards re-admission)
+	mu                 sync.RWMutex
+	ledger             *core.LedgerService
+	rocks              *core.RocksStoreClient
+	transactions       map[string]*Transaction
+	mempool            []*Transaction
+	pendingBlock       []*Transaction // L1 collected → awaiting L2 confirmation
+	addressTxs         map[string][]*Transaction
+	lastTx             *Transaction
+	blockCounter       int64
+	blockHistory       []BlockRecord
+	totalFeesCollected int64 // total fees from all confirmed TX
+	chainFile          string
+	confirmedHashes    map[string]bool // hashes already in a confirmed block (guards re-admission)
 }
 
 // NewBlockchain creates a new blockchain instance
@@ -228,18 +228,18 @@ func (bc *Blockchain) GetTransactionsByAddress(address string) []*Transaction {
 func (bc *Blockchain) AddTransaction(tx *Transaction) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
-	
+
 	if tx.Hash == "" {
 		return errors.New("transaction hash is required")
 	}
-	
+
 	bc.transactions[tx.Hash] = tx
 	bc.lastTx = tx
-	
+
 	// Add to address transactions
 	bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
 	bc.addressTxs[tx.To] = append(bc.addressTxs[tx.To], tx)
-	
+
 	return nil
 }
 
@@ -247,7 +247,7 @@ func (bc *Blockchain) AddTransaction(tx *Transaction) error {
 func (bc *Blockchain) GetLastTransaction() *Transaction {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	
+
 	return bc.lastTx
 }
 
@@ -1032,24 +1032,36 @@ func (bc *Blockchain) GetBlockByNumber(blockNumber int64) *BlockRecord {
 
 // ChainStats holds aggregate stats for analytics
 type ChainStats struct {
-	ChainTxCount   int   `json:"chainTxCount"`
-	MempoolCount   int   `json:"mempoolCount"`
-	PendingCount   int   `json:"pendingCount"`
-	TotalFees      int64 `json:"totalFees"`
-	LastBlockNum   int64 `json:"lastBlockNumber"`
+	ChainTxCount int   `json:"chainTxCount"`
+	MempoolCount int   `json:"mempoolCount"`
+	PendingCount int   `json:"pendingCount"`
+	TotalFees    int64 `json:"totalFees"`
+	LastBlockNum int64 `json:"lastBlockNumber"`
 }
 
 // GetStats returns current chain/mempool/pending stats and total fees
 func (bc *Blockchain) GetStats() ChainStats {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	
+
 	lastNum := int64(0)
 	if bc.blockCounter > 0 {
 		lastNum = bc.blockCounter - 1
 	}
+	chainTxCount := len(bc.transactions)
+	if bc.rocks != nil && bc.rocks.Enabled() {
+		canonical := make(map[string]bool)
+		for _, block := range bc.blockHistory {
+			for _, hash := range block.TxHashes {
+				if hash != "" {
+					canonical[hash] = true
+				}
+			}
+		}
+		chainTxCount = len(canonical)
+	}
 	st := ChainStats{
-		ChainTxCount: len(bc.transactions),
+		ChainTxCount: chainTxCount,
 		MempoolCount: len(bc.mempool),
 		PendingCount: len(bc.pendingBlock),
 		TotalFees:    bc.totalFeesCollected,
