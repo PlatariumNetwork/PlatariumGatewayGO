@@ -108,6 +108,24 @@ func (h *Handler) initRocksFromChainFile(chainFile string) {
 	} else if head, err := rocks.RocksGetHead(); err == nil {
 		logger.Info("RocksDB canonical head=%d gatewayHead=%d", head, h.blockchain.HeadBlockNumber())
 	}
+
+	// chain.json may be stale: while Rocks is canonical, persistChain used to be a
+	// no-op, so restarts only kept old explorer txs. Rebuild the in-memory index
+	// from Rocks whenever it is incomplete relative to blockHistory.
+	expected := h.blockchain.ExpectedConfirmedTxCount()
+	indexed := h.blockchain.IndexedTransactionCount()
+	if expected > 0 && indexed < expected {
+		logger.Info("Explorer index incomplete (%d/%d txs) — hydrating from RocksDB…", indexed, expected)
+		n, err := h.blockchain.HydrateExplorerIndexFromRocks()
+		if err != nil {
+			logger.Warn("Explorer index hydrate from RocksDB failed: %v", err)
+			return
+		}
+		logger.Info("Explorer index hydrated from RocksDB (%d txs)", n)
+		if err := h.blockchain.PersistChainSnapshot(); err != nil {
+			logger.Warn("Persist explorer chain cache after hydrate failed: %v", err)
+		}
+	}
 }
 
 func (h *Handler) rebuildDistributorTotalsFromChain() {

@@ -58,11 +58,15 @@ func (bc *Blockchain) LoadChainFile(path string) error {
 	bc.blockHistory = append([]BlockRecord(nil), file.Blocks...)
 	bc.transactions = make(map[string]*Transaction, len(file.Transactions))
 	bc.addressTxs = make(map[string][]*Transaction)
+	bc.confirmedHashes = make(map[string]bool, len(file.Transactions))
 	for _, tx := range file.Transactions {
 		if tx == nil || tx.Hash == "" {
 			continue
 		}
 		bc.transactions[tx.Hash] = tx
+		if tx.BlockNumber >= 0 {
+			bc.confirmedHashes[tx.Hash] = true
+		}
 		bc.lastTx = tx
 		bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
 		bc.addressTxs[tx.To] = append(bc.addressTxs[tx.To], tx)
@@ -86,7 +90,8 @@ func (bc *Blockchain) ChainFilePath() string {
 }
 
 // PersistChainSnapshot writes indexed transactions and block history to disk.
-// No-op when Core RocksDB is the canonical store (see PLATARIUM_ROCKSDB_PATH).
+// When RocksDB is enabled this is still written as a fast explorer restart cache;
+// RocksDB remains the canonical chain source of truth.
 func (bc *Blockchain) PersistChainSnapshot() error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -96,10 +101,6 @@ func (bc *Blockchain) PersistChainSnapshot() error {
 // persistChain writes the chain snapshot when a chain file is configured.
 // Caller must hold bc.mu (write lock).
 func (bc *Blockchain) persistChain() error {
-	// Canonical chain data lives in Core RocksDB; JSON chain files are legacy/migration only.
-	if bc.rocks != nil && bc.rocks.Enabled() {
-		return nil
-	}
 	path := bc.chainFile
 	if path == "" {
 		return nil
