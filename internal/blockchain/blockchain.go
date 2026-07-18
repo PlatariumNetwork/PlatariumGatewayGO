@@ -158,6 +158,7 @@ func (bc *Blockchain) GetAccountQuery(address string) (*core.AccountQuery, error
 }
 
 // GetTransaction returns a transaction by hash (RocksDB when available, else in-memory index).
+// Rocks hits are cached into the explorer index so pagination does not re-fetch via CLI.
 func (bc *Blockchain) GetTransaction(hash string) *Transaction {
 	bc.mu.RLock()
 	if tx := bc.transactions[hash]; tx != nil {
@@ -165,10 +166,68 @@ func (bc *Blockchain) GetTransaction(hash string) *Transaction {
 		return tx
 	}
 	bc.mu.RUnlock()
-	if bc.RocksEnabled() {
-		return bc.getTransactionFromRocks(hash)
+	if !bc.RocksEnabled() {
+		return nil
 	}
-	return nil
+	tx := bc.getTransactionFromRocks(hash)
+	if tx == nil {
+		return nil
+	}
+	bc.mu.Lock()
+	if existing := bc.transactions[hash]; existing != nil {
+		bc.mu.Unlock()
+		return existing
+	}
+	bc.transactions[hash] = tx
+	bc.confirmedHashes[hash] = true
+	if tx.From != "" {
+		bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
+	}
+	if tx.To != "" && tx.To != tx.From {
+		bc.addressTxs[tx.To] = append(bc.addressTxs[tx.To], tx)
+	}
+	bc.mu.Unlock()
+	return tx
+}
+
+// ConfirmedTxRef is a lightweight pointer into the canonical block timeline.
+type ConfirmedTxRef struct {
+	Hash        string
+	BlockNumber int64
+	Timestamp   int64
+}
+
+// ConfirmedTxRefsNewestFirst lists every confirmed tx hash from in-memory blockHistory
+// (newest block first). Prefer this over the explorer tx map when the index is still
+// hydrating from RocksDB after restart.
+func (bc *Blockchain) ConfirmedTxRefsNewestFirst() []ConfirmedTxRef {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	if len(bc.blockHistory) == 0 {
+		return nil
+	}
+	blocks := append([]BlockRecord(nil), bc.blockHistory...)
+	sort.Slice(blocks, func(i, j int) bool {
+		return blocks[i].BlockNumber > blocks[j].BlockNumber
+	})
+	out := make([]ConfirmedTxRef, 0)
+	seen := make(map[string]bool)
+	for _, block := range blocks {
+		// Reverse within block so later-included txs appear first (closer to tip).
+		for i := len(block.TxHashes) - 1; i >= 0; i-- {
+			hash := block.TxHashes[i]
+			if hash == "" || seen[hash] {
+				continue
+			}
+			seen[hash] = true
+			out = append(out, ConfirmedTxRef{
+				Hash:        hash,
+				BlockNumber: block.BlockNumber,
+				Timestamp:   block.Timestamp,
+			})
+		}
+	}
+	return out
 }
 
 // GetTransactionsByAddress returns transactions where address is sender or receiver
@@ -787,8 +846,22 @@ func sortTxsByTimestamp(txs []*Transaction) {
 }
 
 // TxHashToBlockNumber maps confirmed transaction hashes to their block numbers.
+// Uses in-memory blockHistory first (synced from Rocks at startup) to avoid a full
+// Rocks CLI scan on every explorer request.
 func (bc *Blockchain) TxHashToBlockNumber() map[string]int64 {
+	bc.mu.RLock()
 	out := make(map[string]int64)
+	for _, block := range bc.blockHistory {
+		for _, hash := range block.TxHashes {
+			if hash != "" {
+				out[hash] = block.BlockNumber
+			}
+		}
+	}
+	bc.mu.RUnlock()
+	if len(out) > 0 {
+		return out
+	}
 	if bc.RocksEnabled() {
 		if blocks, err := bc.listBlockHistoryFromRocks(); err == nil {
 			for _, block := range blocks {
@@ -797,18 +870,6 @@ func (bc *Blockchain) TxHashToBlockNumber() map[string]int64 {
 						out[hash] = block.BlockNumber
 					}
 				}
-			}
-			if len(out) > 0 {
-				return out
-			}
-		}
-	}
-	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-	for _, block := range bc.blockHistory {
-		for _, hash := range block.TxHashes {
-			if hash != "" {
-				out[hash] = block.BlockNumber
 			}
 		}
 	}

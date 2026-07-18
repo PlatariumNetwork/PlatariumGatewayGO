@@ -1631,19 +1631,9 @@ func (h *Handler) GetMempool(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetAllTransactions returns a paginated explorer transaction index.
-// Use status=confirmed to exclude pending and mempool records.
+// Use status=confirmed to list the canonical chain (blockHistory), not only the
+// partially-hydrated in-memory explorer map after restart.
 func (h *Handler) GetAllTransactions(w http.ResponseWriter, r *http.Request) {
-	items := h.buildExplorerTransactionList()
-	if strings.EqualFold(r.URL.Query().Get("status"), "confirmed") {
-		confirmed := make([]map[string]interface{}, 0, len(items))
-		for _, item := range items {
-			if status, _ := item["status"].(string); strings.EqualFold(status, "confirmed") {
-				confirmed = append(confirmed, item)
-			}
-		}
-		items = confirmed
-	}
-
 	page := 1
 	limit := 50
 	if value := r.URL.Query().Get("page"); value != "" {
@@ -1660,6 +1650,12 @@ func (h *Handler) GetAllTransactions(w http.ResponseWriter, r *http.Request) {
 		limit = 100
 	}
 
+	if strings.EqualFold(r.URL.Query().Get("status"), "confirmed") {
+		h.serveConfirmedTransactionsPage(w, page, limit)
+		return
+	}
+
+	items := h.buildExplorerTransactionList()
 	totalCount := len(items)
 	totalPages := (totalCount + limit - 1) / limit
 	if totalPages < 1 {
@@ -1679,6 +1675,63 @@ func (h *Handler) GetAllTransactions(w http.ResponseWriter, r *http.Request) {
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"transactions": items[start:end],
+		"count":        totalCount,
+		"page":         page,
+		"limit":        limit,
+		"totalPages":   totalPages,
+	})
+}
+
+func (h *Handler) serveConfirmedTransactionsPage(w http.ResponseWriter, page, limit int) {
+	refs := h.blockchain.ConfirmedTxRefsNewestFirst()
+	totalCount := len(refs)
+	totalPages := (totalCount + limit - 1) / limit
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * limit
+	if start > totalCount {
+		start = totalCount
+	}
+	end := start + limit
+	if end > totalCount {
+		end = totalCount
+	}
+
+	pageRefs := refs[start:end]
+	out := make([]map[string]interface{}, 0, len(pageRefs))
+	for _, ref := range pageRefs {
+		tx := h.blockchain.GetTransaction(ref.Hash)
+		if tx == nil {
+			// Placeholder keeps pagination aligned with canonical count when a Rocks
+			// read fails transiently; UI still sees the correct total.
+			out = append(out, map[string]interface{}{
+				"hash":        ref.Hash,
+				"blockNumber": ref.BlockNumber,
+				"timestamp":   ref.Timestamp,
+				"status":      "confirmed",
+				"value":       "0",
+				"fee":         "0",
+			})
+			continue
+		}
+		m := txToMap(tx)
+		if m == nil {
+			continue
+		}
+		m["blockNumber"] = ref.BlockNumber
+		m["status"] = "confirmed"
+		if txMapTimestamp(m) <= 0 && ref.Timestamp > 0 {
+			m["timestamp"] = ref.Timestamp
+		}
+		out = append(out, m)
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"transactions": out,
 		"count":        totalCount,
 		"page":         page,
 		"limit":        limit,
