@@ -118,12 +118,19 @@ func (h *Handler) validateTxsForL1(txs []*blockchain.Transaction) l1ValidateOutc
 		res, err := h.rustCore.L1VerifyTxs(ledger.StateFilePath(), txsJSON)
 		// Even when Valid=false, Core returns per-tx results — use them to drop poison txs.
 		if res != nil && len(res.TxResults) > 0 {
+			// Only permanently-invalid txs are dropped from mempool. Future nonces
+			// ("expected N, got M" with M>N) must stay — they become packable after N confirms.
 			invalid := make([]string, 0)
 			validSet := make(map[string]bool, len(res.TxResults))
 			for _, tr := range res.TxResults {
 				if tr.Valid {
 					validSet[tr.Hash] = true
-				} else if tr.Hash != "" {
+					continue
+				}
+				if tr.Hash == "" {
+					continue
+				}
+				if isPermanentMempoolInvalid(tr.Error) {
 					invalid = append(invalid, tr.Hash)
 				}
 			}
@@ -136,7 +143,7 @@ func (h *Handler) validateTxsForL1(txs []*blockchain.Transaction) l1ValidateOutc
 					good = append(good, tx)
 				}
 			}
-			if len(invalid) > 0 || (err != nil && !res.Valid) {
+			if len(invalid) > 0 || (err != nil && !res.Valid && len(good) == 0) {
 				msg := "L1 verification failed"
 				if err != nil {
 					msg = err.Error()
@@ -149,7 +156,18 @@ func (h *Handler) validateTxsForL1(txs []*blockchain.Transaction) l1ValidateOutc
 					ValidTxs:      good,
 				}
 			}
-			return l1ValidateOutcome{OK: true, ValidTxs: good}
+			if res.Valid && len(invalid) == 0 {
+				return l1ValidateOutcome{OK: true, ValidTxs: good}
+			}
+			// Some txs failed but were kept (future nonce). Pack only the valid prefix.
+			if len(good) > 0 {
+				return l1ValidateOutcome{OK: true, ValidTxs: good}
+			}
+			return l1ValidateOutcome{
+				Err:           fmt.Errorf("%s", firstNonEmpty(res.Error, "L1 verification failed")),
+				InvalidHashes: invalid,
+				ValidTxs:      good,
+			}
 		}
 		if err != nil {
 			// Fallback: parse hash from "L1 verification failed for tx <hash>"
@@ -175,6 +193,20 @@ func (h *Handler) validateTxsForL1(txs []*blockchain.Transaction) l1ValidateOutc
 			}
 		}
 		if _, err := ledger.ValidateTx(coreJSON); err != nil {
+			if !isPermanentMempoolInvalid(err.Error()) {
+				// Future nonce / not yet applicable — keep in mempool, stop packing here.
+				good := make([]*blockchain.Transaction, 0)
+				for _, t := range txs {
+					if t == nil || t == tx {
+						break
+					}
+					good = append(good, t)
+				}
+				if len(good) > 0 {
+					return l1ValidateOutcome{OK: true, ValidTxs: good}
+				}
+				return l1ValidateOutcome{Err: err, ValidTxs: nil}
+			}
 			return l1ValidateOutcome{
 				Err:           err,
 				InvalidHashes: []string{tx.Hash},
@@ -182,6 +214,45 @@ func (h *Handler) validateTxsForL1(txs []*blockchain.Transaction) l1ValidateOutc
 		}
 	}
 	return l1ValidateOutcome{OK: true, ValidTxs: txs}
+}
+
+// isPermanentMempoolInvalid reports whether a Core validation error means the tx
+// should be deleted from the mempool. Future nonces must NOT be deleted.
+func isPermanentMempoolInvalid(errMsg string) bool {
+	msg := strings.ToLower(errMsg)
+	if msg == "" {
+		// Unknown failure from Core without detail — treat as permanent to avoid stalls.
+		return true
+	}
+	// "invalid nonce: expected N, got M"
+	if strings.Contains(msg, "nonce") {
+		var expected, got int
+		if _, err := fmt.Sscanf(msg, "invalid nonce: expected %d, got %d", &expected, &got); err == nil {
+			if got > expected {
+				return false
+			}
+			return true // stale / duplicate (got < expected or equal mishandled)
+		}
+		// Loose match for nested error strings.
+		reExp := strings.Index(msg, "expected ")
+		reGot := strings.Index(msg, "got ")
+		if reExp >= 0 && reGot > reExp {
+			var expected, got int
+			if _, err := fmt.Sscanf(msg[reExp:], "expected %d, got %d", &expected, &got); err == nil && got > expected {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func extractFailedTxHash(msg string) string {

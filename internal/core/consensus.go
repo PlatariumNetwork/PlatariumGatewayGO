@@ -28,6 +28,7 @@ type VoteResult struct {
 type L1TxVerifyResult struct {
 	Hash  string `json:"hash"`
 	Valid bool   `json:"valid"`
+	Error string `json:"error,omitempty"`
 }
 
 // L1VerifyResult is the parsed l1-verify-txs response.
