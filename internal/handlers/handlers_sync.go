@@ -109,22 +109,29 @@ func (h *Handler) initRocksFromChainFile(chainFile string) {
 		logger.Info("RocksDB canonical head=%d gatewayHead=%d", head, h.blockchain.HeadBlockNumber())
 	}
 
-	// chain.json may be stale: while Rocks is canonical, persistChain used to be a
-	// no-op, so restarts only kept old explorer txs. Rebuild the in-memory index
-	// from Rocks whenever it is incomplete relative to blockHistory.
+	// Hydrate asynchronously so REST/WS can bind immediately. A full Rocks
+	// rebuild can take minutes (one CLI call per block/tx) and must not block Listen.
+	go h.hydrateExplorerIndexFromRocksIfNeeded()
+}
+
+func (h *Handler) hydrateExplorerIndexFromRocksIfNeeded() {
+	if !h.blockchain.RocksEnabled() {
+		return
+	}
 	expected := h.blockchain.ExpectedConfirmedTxCount()
 	indexed := h.blockchain.IndexedTransactionCount()
-	if expected > 0 && indexed < expected {
-		logger.Info("Explorer index incomplete (%d/%d txs) — hydrating from RocksDB…", indexed, expected)
-		n, err := h.blockchain.HydrateExplorerIndexFromRocks()
-		if err != nil {
-			logger.Warn("Explorer index hydrate from RocksDB failed: %v", err)
-			return
-		}
-		logger.Info("Explorer index hydrated from RocksDB (%d txs)", n)
-		if err := h.blockchain.PersistChainSnapshot(); err != nil {
-			logger.Warn("Persist explorer chain cache after hydrate failed: %v", err)
-		}
+	if expected <= 0 || indexed >= expected {
+		return
+	}
+	logger.Info("Explorer index incomplete (%d/%d txs) — hydrating from RocksDB…", indexed, expected)
+	n, err := h.blockchain.HydrateExplorerIndexFromRocks()
+	if err != nil {
+		logger.Warn("Explorer index hydrate from RocksDB failed: %v", err)
+		return
+	}
+	logger.Info("Explorer index hydrated from RocksDB (%d txs)", n)
+	if err := h.blockchain.PersistChainSnapshot(); err != nil {
+		logger.Warn("Persist explorer chain cache after hydrate failed: %v", err)
 	}
 }
 
