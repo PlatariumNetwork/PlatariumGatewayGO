@@ -2695,14 +2695,9 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		} else if hash := extractFailedTxHash(err.Error()); hash != "" {
 			drop = []string{hash}
 		}
-		if len(drop) == 0 {
-			// Unknown poison — discard the whole pack so auto-block cannot stall.
-			for _, tx := range h.blockchain.GetPendingBlock() {
-				if tx != nil && tx.Hash != "" {
-					drop = append(drop, tx.Hash)
-				}
-			}
-		}
+		// If we cannot identify the poison tx, return the whole pending pack to
+		// the mempool (drop=nil). Discarding unknown packs made accepted txs
+		// vanish from explorer with no blockNumber.
 		returned, dropped := h.blockchain.AbandonPendingBlock(drop)
 		logger.Warn("L2 confirm recovery: returned=%d dropped=%d drop=%v", returned, dropped, drop)
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

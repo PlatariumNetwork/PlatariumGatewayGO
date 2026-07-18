@@ -331,6 +331,10 @@ func (bc *Blockchain) RemoveFromMempool(hashes []string) {
 	for _, tx := range bc.mempool {
 		if tx == nil || !remove[tx.Hash] {
 			next = append(next, tx)
+			continue
+		}
+		if tx.Hash != "" && !bc.confirmedHashes[tx.Hash] {
+			delete(bc.transactions, tx.Hash)
 		}
 	}
 	bc.mempool = next
@@ -563,6 +567,10 @@ func (bc *Blockchain) AbandonPendingBlock(drop []string) (returned, dropped int)
 		}
 		if dropSet[tx.Hash] {
 			dropped++
+			// Purge unconfirmed index entries so explorer does not keep "ghost" txs.
+			if !bc.confirmedHashes[tx.Hash] {
+				delete(bc.transactions, tx.Hash)
+			}
 			continue
 		}
 		bc.mempool = append(bc.mempool, tx)
