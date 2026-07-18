@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -75,16 +76,18 @@ type Blockchain struct {
 	blockHistory        []BlockRecord
 	totalFeesCollected  int64 // total fees from all confirmed TX
 	chainFile           string
+	confirmedHashes     map[string]bool // hashes already in a confirmed block (guards re-admission)
 }
 
 // NewBlockchain creates a new blockchain instance
 func NewBlockchain() *Blockchain {
 	return &Blockchain{
-		transactions: make(map[string]*Transaction),
-		mempool:      make([]*Transaction, 0),
-		pendingBlock: make([]*Transaction, 0),
-		addressTxs:   make(map[string][]*Transaction),
-		blockHistory: make([]BlockRecord, 0),
+		transactions:    make(map[string]*Transaction),
+		mempool:         make([]*Transaction, 0),
+		pendingBlock:    make([]*Transaction, 0),
+		addressTxs:      make(map[string][]*Transaction),
+		blockHistory:    make([]BlockRecord, 0),
+		confirmedHashes: make(map[string]bool),
 	}
 }
 
@@ -252,9 +255,15 @@ func (bc *Blockchain) GetLastTransaction() *Transaction {
 func (bc *Blockchain) AddToMempool(tx *Transaction) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
-	
+
 	if tx.Hash == "" {
 		return errors.New("transaction hash is required")
+	}
+	// Never re-admit a tx already confirmed in a block. Late gossip (mempool:add
+	// arriving after block_confirmed) otherwise makes confirmed txs reappear in
+	// the mempool, which looks like txs "disappearing then coming back".
+	if bc.confirmedHashes[tx.Hash] {
+		return nil
 	}
 	for _, t := range bc.mempool {
 		if t.Hash == tx.Hash {
@@ -265,13 +274,31 @@ func (bc *Blockchain) AddToMempool(tx *Transaction) error {
 	return nil
 }
 
-// GetMempool returns a copy of pending transactions
+// GetMempool returns a deterministically ordered copy of pending transactions.
+// Order is stable (timestamp, then sender, then nonce) so repeated reads and
+// reads across nodes never appear to "shuffle".
 func (bc *Blockchain) GetMempool() []*Transaction {
 	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-	
 	out := make([]*Transaction, len(bc.mempool))
 	copy(out, bc.mempool)
+	bc.mu.RUnlock()
+
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a == nil || b == nil {
+			return a != nil
+		}
+		if a.Timestamp != b.Timestamp {
+			return a.Timestamp < b.Timestamp
+		}
+		if a.From != b.From {
+			return a.From < b.From
+		}
+		if a.Nonce != b.Nonce {
+			return a.Nonce < b.Nonce
+		}
+		return a.Hash < b.Hash
+	})
 	return out
 }
 
@@ -567,6 +594,7 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 		bc.addressTxs[tx.To] = append(bc.addressTxs[tx.To], tx)
 		block.TxHashes = append(block.TxHashes, tx.Hash)
 		block.TxCount++
+		bc.confirmedHashes[tx.Hash] = true
 		if block.Timestamp == 0 || tx.Timestamp > 0 {
 			block.Timestamp = tx.Timestamp
 		}
@@ -677,7 +705,13 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 		bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
 		bc.addressTxs[tx.To] = append(bc.addressTxs[tx.To], tx)
 		txHashes[tx.Hash] = true
+		bc.confirmedHashes[tx.Hash] = true
 		bc.totalFeesCollected += fee
+	}
+	for _, h := range block.TxHashes {
+		if h != "" {
+			bc.confirmedHashes[h] = true
+		}
 	}
 	newMempool := make([]*Transaction, 0, len(bc.mempool))
 	for _, tx := range bc.mempool {
