@@ -39,3 +39,13 @@ Thumbs.db
 ecosystem.gateway.config.json
 ecosystem.gateway.config.cjs
 
+# Split-node runtime (node0 / node1 keep their own data on the server)
+node0/data/
+node0/log/
+node0/platarium-gateway
+node0/.env
+node1/data/
+node1/log/
+node1/platarium-gateway
+node1/.env
+
