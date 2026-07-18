@@ -88,6 +88,10 @@ type Handler struct {
 
 	autoBlockMu sync.Mutex
 
+	// Serializes mempool admit (Core CLI snapshot + index) so parallel HTTP
+	// clients cannot TOCTOU the same sender nonce. Persist is not done here.
+	mempoolAdmitMu sync.Mutex
+
 	// Operator wallet (PLATARIUM_OPERATOR_WALLET): receives validation fee credits + Contributor XP.
 	operatorWallet        string
 	contributorsAPIURL    string
@@ -210,11 +214,10 @@ func (h *Handler) onMempoolAdd(txMap map[string]interface{}) {
 	if tx == nil {
 		return
 	}
-	if err := h.validateTxForMempool(tx); err != nil {
+	if err := h.admitToMempool(tx); err != nil {
 		logger.Warn("mempool:add rejected tx %s: %v", tx.Hash, err)
 		return
 	}
-	_ = h.blockchain.AddToMempool(tx)
 }
 
 // validateTxForMempool delegates all consensus admission rules to PlatariumCore.
@@ -270,10 +273,22 @@ func (h *Handler) indexMempoolAdmission(tx *blockchain.Transaction) error {
 	if err := h.blockchain.AddTransaction(tx); err != nil {
 		log.Printf("[mempool] tx index warning for %s: %v", tx.Hash, err)
 	}
-	if err := h.blockchain.PersistChainSnapshot(); err != nil {
-		log.Printf("[mempool] chain persist warning for %s: %v", tx.Hash, err)
-	}
+	// Do NOT PersistChainSnapshot here: rewriting the full explorer chain.json
+	// (~thousands of txs) on every admit holds the write lock and collapses
+	// parallel pg-sendtx to ~1s each. Canonical state is RocksDB + state.json;
+	// chain.json is persisted on block confirm / sync hydrate.
 	return nil
+}
+
+// admitToMempool runs Core mempool-admit + local index under a single mutex so
+// concurrent HTTP submits cannot race the same sender nonce (TOCTOU on snapshot).
+func (h *Handler) admitToMempool(tx *blockchain.Transaction) error {
+	h.mempoolAdmitMu.Lock()
+	defer h.mempoolAdmitMu.Unlock()
+	if err := h.validateTxForMempool(tx); err != nil {
+		return err
+	}
+	return h.indexMempoolAdmission(tx)
 }
 
 func (h *Handler) onPendingBlockSync(pendingMaps []map[string]interface{}) {
@@ -1526,11 +1541,7 @@ func (h *Handler) submitCoreSignedTx(w http.ResponseWriter, txData map[string]in
 	if tx.Fee == "" && tx.FeeUplp > 0 {
 		tx.Fee = strconv.FormatUint(tx.FeeUplp, 10)
 	}
-	if err := h.validateTxForMempool(tx); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	if err := h.indexMempoolAdmission(tx); err != nil {
+	if err := h.admitToMempool(tx); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1983,11 +1994,7 @@ func (h *Handler) DemoSendTx(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.validateTxForMempool(tx); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	if err := h.indexMempoolAdmission(tx); err != nil {
+	if err := h.admitToMempool(tx); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
