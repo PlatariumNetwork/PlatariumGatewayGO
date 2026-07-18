@@ -30,12 +30,12 @@ import (
 )
 
 const (
-	L1VoteThresholdPct  = 67 // L1 need 67% yes (Core: L1_CONFIRM_THRESHOLD_PCT)
-	L2VoteThresholdPct  = 70 // L2 need 70% yes (Core)
-	VoteRoundTimeoutMin = 5 * time.Second   // minimum wait for votes
+	L1VoteThresholdPct      = 67                     // L1 need 67% yes (Core: L1_CONFIRM_THRESHOLD_PCT)
+	L2VoteThresholdPct      = 70                     // L2 need 70% yes (Core)
+	VoteRoundTimeoutMin     = 5 * time.Second        // minimum wait for votes
 	VoteRoundTimeoutPerNode = 150 * time.Millisecond // extra time per expected node (for 100 nodes: 5s + 15s = 20s)
-	VoteRoundTimeoutMax = 45 * time.Second  // cap so we don't wait forever
-	ForwardRequestTimeout = 60 * time.Second // timeout when forwarding L1/L2 (vote round + processing)
+	VoteRoundTimeoutMax     = 45 * time.Second       // cap so we don't wait forever
+	ForwardRequestTimeout   = 60 * time.Second       // timeout when forwarding L1/L2 (vote round + processing)
 )
 
 type l1VoteRound struct {
@@ -74,11 +74,11 @@ type Handler struct {
 	l2VoteRound   *l2VoteRound
 	l2VotedIds    map[string]bool
 	// Last round result for UI (real votes)
-	lastL1VotesMu   sync.RWMutex
-	lastL1Votes     map[string]bool // nodeId -> yes
-	lastL1Accepted  bool
-	lastL2Votes     map[string]bool
-	lastL2Accepted  bool
+	lastL1VotesMu  sync.RWMutex
+	lastL1Votes    map[string]bool // nodeId -> yes
+	lastL1Accepted bool
+	lastL2Votes    map[string]bool
+	lastL2Accepted bool
 
 	faucetStore     *faucet.CooldownStore
 	faucetAmountPLP uint64
@@ -351,15 +351,15 @@ func txToCoreJSON(tx *blockchain.Transaction) (jsonStr string, ok bool) {
 		writes = []string{}
 	}
 	m := map[string]interface{}{
-		"hash":       tx.Hash,
-		"from":       tx.From,
-		"to":         tx.To,
-		"asset":      asset,
-		"amount":     amount,
-		"fee_uplp":   feeUplp,
-		"nonce":      tx.Nonce,
-		"reads":      reads,
-		"writes":     writes,
+		"hash":        tx.Hash,
+		"from":        tx.From,
+		"to":          tx.To,
+		"asset":       asset,
+		"amount":      amount,
+		"fee_uplp":    feeUplp,
+		"nonce":       tx.Nonce,
+		"reads":       reads,
+		"writes":      writes,
 		"sig_main":    tx.SigMain,
 		"sig_derived": tx.SigDerived,
 	}
@@ -952,13 +952,13 @@ func (h *Handler) NetworkStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetSockets(w http.ResponseWriter, r *http.Request) {
 	// Query peer nodes for their socket lists
 	h.nodesManager.QueryPeerSockets()
-	
+
 	allSockets := h.nodesManager.GetConnectedSockets()
 	connectedNodes := h.nodesManager.GetConnectedNodes()
-	
+
 	response := map[string]interface{}{
-		"nodeId":          h.nodesManager.GetNodeID(),
-		"nodeAddress":     h.nodesManager.GetNodeAddress(),
+		"nodeId":           h.nodesManager.GetNodeID(),
+		"nodeAddress":      h.nodesManager.GetNodeAddress(),
 		"connectedSockets": allSockets,
 		"summary": map[string]interface{}{
 			"connectedClients": len(allSockets),
@@ -971,17 +971,17 @@ func (h *Handler) GetSockets(w http.ResponseWriter, r *http.Request) {
 // GetDetailedStatus returns detailed status of all components
 func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
 	components := make(map[string]string)
-	
+
 	// Check REST API status (if we can respond, it's OK)
 	components["REST"] = "ok"
-	
+
 	// Check WebSocket server status
 	if h.wsServer != nil {
 		components["WebSocket"] = "ok"
 	} else {
 		components["WebSocket"] = "not_ok"
 	}
-	
+
 	// Check P2P connections (must have at least 1 peer)
 	connectedNodes := h.nodesManager.GetConnectedNodes()
 	if len(connectedNodes) > 0 {
@@ -989,7 +989,7 @@ func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
 	} else {
 		components["P2P"] = "not_ok"
 	}
-	
+
 	// Check Balance system (check if blockchain is initialized)
 	if h.blockchain != nil {
 		if _, err := h.blockchain.GetBalance("test"); err == nil {
@@ -1002,7 +1002,7 @@ func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
 	} else {
 		components["Balance"] = "not_ok"
 	}
-	
+
 	// Check Transactions module (check if we can get last transaction)
 	if h.blockchain != nil {
 		lastTx := h.blockchain.GetLastTransaction()
@@ -1015,7 +1015,7 @@ func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
 	} else {
 		components["Transactions"] = "not_ok"
 	}
-	
+
 	// Determine overall status
 	overallStatus := "ok"
 	for _, status := range components {
@@ -1024,16 +1024,16 @@ func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	
+
 	// Get peers with ping information
 	peersWithPing := h.nodesManager.GetPeersWithPing()
-	
+
 	// Get socket summary
 	allSockets := h.nodesManager.GetConnectedSockets()
-	
+
 	// Get metrics
 	metrics := h.nodesManager.GetMetrics()
-	
+
 	response := map[string]interface{}{
 		"network":        "Platarium",
 		"status":         overallStatus,
@@ -1049,7 +1049,7 @@ func (h *Handler) GetDetailedStatus(w http.ResponseWriter, r *http.Request) {
 		"metrics":   metrics,
 		"timestamp": time.Now().UnixMilli(),
 	}
-	
+
 	jsonResponse(w, http.StatusOK, response)
 }
 
@@ -1128,10 +1128,10 @@ func (h *Handler) GenerateWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"mnemonic":    mnemonic,
+		"mnemonic":     mnemonic,
 		"alphanumeric": alphanumeric,
-		"publicKey":   publicKey,
-		"address":     publicKey,
+		"publicKey":    publicKey,
+		"address":      publicKey,
 	})
 }
 
@@ -1245,15 +1245,15 @@ func (h *Handler) Faucet(w http.ResponseWriter, r *http.Request) {
 		nextClaimAt = now.Add(h.faucetStoreRemainingDuration()).Unix()
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"success":         true,
-		"network":         faucetNetworkID(),
-		"address":         address,
-		"creditedPlP":     amount,
-		"txHash":          tx.Hash,
-		"balance":         balance,
-		"uplpBalance":     uplpBalance,
-		"nextClaimAt":     nextClaimAt,
-		"message":         fmt.Sprintf("Credited %d test PLP instantly. You can send PLP using normal wallet rules.", amount),
+		"success":     true,
+		"network":     faucetNetworkID(),
+		"address":     address,
+		"creditedPlP": amount,
+		"txHash":      tx.Hash,
+		"balance":     balance,
+		"uplpBalance": uplpBalance,
+		"nextClaimAt": nextClaimAt,
+		"message":     fmt.Sprintf("Credited %d test PLP instantly. You can send PLP using normal wallet rules.", amount),
 	})
 }
 
@@ -1285,10 +1285,10 @@ func (h *Handler) FaucetCooldown(w http.ResponseWriter, r *http.Request) {
 		wait = h.faucetStore.Remaining(address, now)
 	}
 	resp := map[string]interface{}{
-		"network":     faucetNetworkID(),
-		"address":     address,
-		"amountPlP":   amount,
-		"canClaim":    wait == 0,
+		"network":       faucetNetworkID(),
+		"address":       address,
+		"amountPlP":     amount,
+		"canClaim":      wait == 0,
 		"cooldownHours": int(faucetCooldownFromEnv().Hours()),
 	}
 	if wait > 0 {
@@ -1369,7 +1369,7 @@ func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetTransactions(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	address := vars["address"]
-	
+
 	txs := h.blockchain.GetTransactionsByAddress(address)
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"transactions": txs})
 }
@@ -1619,10 +1619,60 @@ func (h *Handler) GetMempool(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"mempool": txs, "count": len(txs)})
 }
 
-// GetAllTransactions returns confirmed, pending, and mempool transactions for explorer indexing.
+// GetAllTransactions returns a paginated explorer transaction index.
+// Use status=confirmed to exclude pending and mempool records.
 func (h *Handler) GetAllTransactions(w http.ResponseWriter, r *http.Request) {
 	items := h.buildExplorerTransactionList()
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"transactions": items, "count": len(items)})
+	if strings.EqualFold(r.URL.Query().Get("status"), "confirmed") {
+		confirmed := make([]map[string]interface{}, 0, len(items))
+		for _, item := range items {
+			if status, _ := item["status"].(string); strings.EqualFold(status, "confirmed") {
+				confirmed = append(confirmed, item)
+			}
+		}
+		items = confirmed
+	}
+
+	page := 1
+	limit := 50
+	if value := r.URL.Query().Get("page"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			page = parsed
+		}
+	}
+	if value := r.URL.Query().Get("limit"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	totalCount := len(items)
+	totalPages := (totalCount + limit - 1) / limit
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * limit
+	if start > totalCount {
+		start = totalCount
+	}
+	end := start + limit
+	if end > totalCount {
+		end = totalCount
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"transactions": items[start:end],
+		"count":        totalCount,
+		"page":         page,
+		"limit":        limit,
+		"totalPages":   totalPages,
+	})
 }
 
 func (h *Handler) buildExplorerTransactionList() []map[string]interface{} {
@@ -1744,7 +1794,7 @@ func (h *Handler) GetBlock(w http.ResponseWriter, r *http.Request) {
 		nonEmpty(block.L1BeneficiaryNodeId, "-"),
 		nonEmpty(block.L2ConfirmerNodeId, "-"))
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"block":         block,
+		"block":        block,
 		"transactions": txMaps,
 		"consensusLog": consensusLog,
 	})
@@ -1775,18 +1825,18 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"chainTxCount":     st.ChainTxCount,
-		"mempoolCount":     st.MempoolCount,
-		"pendingCount":     st.PendingCount,
-		"totalFees":        st.TotalFees,
-		"lastBlockNumber":  st.LastBlockNum,
-		"nodeEarnedFees":   earnedL2,
-		"nodeEarnedL1":     earnedL1,
-		"totalBurned":      burned,
-		"totalTreasury":    treasury,
-		"operatorWallet":   h.operatorWallet,
-		"networkId":        h.networkID,
-		"blockProposal":    blockProposal,
+		"chainTxCount":    st.ChainTxCount,
+		"mempoolCount":    st.MempoolCount,
+		"pendingCount":    st.PendingCount,
+		"totalFees":       st.TotalFees,
+		"lastBlockNumber": st.LastBlockNum,
+		"nodeEarnedFees":  earnedL2,
+		"nodeEarnedL1":    earnedL1,
+		"totalBurned":     burned,
+		"totalTreasury":   treasury,
+		"operatorWallet":  h.operatorWallet,
+		"networkId":       h.networkID,
+		"blockProposal":   blockProposal,
 		"rewardConfig": map[string]interface{}{
 			"burnPct":     cfg.BurnPct,
 			"treasuryPct": cfg.TreasuryPct,
@@ -2026,8 +2076,8 @@ func (h *Handler) L1CollectBlock(w http.ResponseWriter, r *http.Request) {
 	if txCount == 0 {
 		logger.Warn("L1 collect rejected: mempool empty")
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
-			"error":   "mempool empty",
-			"hint":    "Send transactions first (POST /api/send-tx or /api/demo-sendtx), then call L1 collect",
+			"error": "mempool empty",
+			"hint":  "Send transactions first (POST /api/send-tx or /api/demo-sendtx), then call L1 collect",
 		})
 		return
 	}
@@ -2271,7 +2321,10 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 		round.mu.Lock()
 		if !round.closed {
 			round.closed = true
-			select { case round.done <- true: default: }
+			select {
+			case round.done <- true:
+			default:
+			}
 		}
 		round.mu.Unlock()
 	}
@@ -2283,7 +2336,10 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 		round.mu.Lock()
 		if !round.closed {
 			round.closed = true
-			select { case round.done <- false: default: }
+			select {
+			case round.done <- false:
+			default:
+			}
 		}
 		round.mu.Unlock()
 	}()
@@ -2334,17 +2390,17 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 
 	// Broadcast vote result so all nodes (and any UI) see the same L1 votes
 	go h.nodesManager.BroadcastBlockchainEvent("l1_vote_result", map[string]interface{}{
-		"votes":   round.votes,
+		"votes":    round.votes,
 		"accepted": ok,
 	}, myId)
 
 	if !ok {
 		logger.Error("L1 threshold not met yes=%d total=%d need=%d", yesCount, len(round.votes), need)
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
-			"error":   "L1 threshold not met (need 67% yes)",
-			"yes":     yesCount,
-			"total":   len(round.votes),
-			"need":    need,
+			"error": "L1 threshold not met (need 67% yes)",
+			"yes":   yesCount,
+			"total": len(round.votes),
+			"need":  need,
 		})
 		return
 	}
@@ -2588,7 +2644,10 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		round.mu.Lock()
 		if !round.closed {
 			round.closed = true
-			select { case round.done <- true: default: }
+			select {
+			case round.done <- true:
+			default:
+			}
 		}
 		round.mu.Unlock()
 	}
@@ -2600,7 +2659,10 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		round.mu.Lock()
 		if !round.closed {
 			round.closed = true
-			select { case round.done <- false: default: }
+			select {
+			case round.done <- false:
+			default:
+			}
 		}
 		round.mu.Unlock()
 	}()
@@ -2651,17 +2713,17 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 
 	// Broadcast vote result so all nodes (and any UI) see the same L2 votes
 	go h.nodesManager.BroadcastBlockchainEvent("l2_vote_result", map[string]interface{}{
-		"votes":   round.votes,
+		"votes":    round.votes,
 		"accepted": ok,
 	}, myId)
 
 	if !ok {
 		logger.Error("L2 threshold not met yes=%d total=%d need=%d", yesCountL2, len(round.votes), needL2)
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
-			"error":   "L2 threshold not met (need 70% yes)",
-			"yes":     yesCountL2,
-			"total":   len(round.votes),
-			"need":    needL2,
+			"error": "L2 threshold not met (need 70% yes)",
+			"yes":   yesCountL2,
+			"total": len(round.votes),
+			"need":  needL2,
 		})
 		return
 	}
@@ -2791,26 +2853,26 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		l2VotesIF[k] = v
 	}
 	go h.nodesManager.BroadcastBlockchainEvent("block_confirmed", map[string]interface{}{
-		"blockNumber":           block.BlockNumber,
-		"timestamp":             block.Timestamp,
-		"txHashes":              txHashStrs,
-		"txCount":               block.TxCount,
-		"totalFees":             block.TotalFees,
-		"transactions":          txMaps,
-		"blockHash":             block.BlockHash,
-		"merkleRoot":            block.MerkleRoot,
-		"stateRoot":             block.StateRoot,
-		"previousHash":          block.PreviousHash,
-		"producerNodeId":        block.ProducerNodeID,
-		"l1Yes":                 l1YesResp,
-		"l1No":                  l1NoResp,
-		"l2Yes":                 l2YesResp,
-		"l2No":                  l2NoResp,
-		"durationMs":            durationMs,
-		"l1BeneficiaryNodeId":   l1Ben,
-		"l2ConfirmerNodeId":     myId,
-		"l1Votes":               l1VotesIF,
-		"l2Votes":               l2VotesIF,
+		"blockNumber":         block.BlockNumber,
+		"timestamp":           block.Timestamp,
+		"txHashes":            txHashStrs,
+		"txCount":             block.TxCount,
+		"totalFees":           block.TotalFees,
+		"transactions":        txMaps,
+		"blockHash":           block.BlockHash,
+		"merkleRoot":          block.MerkleRoot,
+		"stateRoot":           block.StateRoot,
+		"previousHash":        block.PreviousHash,
+		"producerNodeId":      block.ProducerNodeID,
+		"l1Yes":               l1YesResp,
+		"l1No":                l1NoResp,
+		"l2Yes":               l2YesResp,
+		"l2No":                l2NoResp,
+		"durationMs":          durationMs,
+		"l1BeneficiaryNodeId": l1Ben,
+		"l2ConfirmerNodeId":   myId,
+		"l1Votes":             l1VotesIF,
+		"l2Votes":             l2VotesIF,
 	}, myId)
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -2874,11 +2936,11 @@ func (h *Handler) GetRewardConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := h.distributor.GetConfig()
 	burned, treasury := h.distributor.Totals()
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"burnPct":     cfg.BurnPct,
-		"treasuryPct": cfg.TreasuryPct,
-		"l1Pct":       cfg.L1Pct,
-		"l2Pct":       cfg.L2Pct,
-		"totalBurned": burned,
+		"burnPct":       cfg.BurnPct,
+		"treasuryPct":   cfg.TreasuryPct,
+		"l1Pct":         cfg.L1Pct,
+		"l2Pct":         cfg.L2Pct,
+		"totalBurned":   burned,
 		"totalTreasury": treasury,
 	})
 }
@@ -2989,13 +3051,13 @@ func (h *Handler) TestSetLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"success":       true,
-		"nodeId":        nodeID,
-		"currentTasks":  n.CurrentTasks,
-		"maxCapacity":   n.MaxCapacity,
-		"loadScore":     n.LoadScore,
+		"success":         true,
+		"nodeId":          nodeID,
+		"currentTasks":    n.CurrentTasks,
+		"maxCapacity":     n.MaxCapacity,
+		"loadScore":       n.LoadScore,
 		"selectionWeight": n.SelectionWeight(),
-		"message":       "Load set (selection weight = reputation×(1−load))",
+		"message":         "Load set (selection weight = reputation×(1−load))",
 	})
 }
 
@@ -3025,7 +3087,7 @@ func (h *Handler) GetNodeRatings(w http.ResponseWriter, r *http.Request) {
 			"reputationScore": s.ReputationScore,
 			"loadScore":       s.LoadScore,
 			"selectionWeight": s.SelectionWeight(),
-			"voteAccuracy":   s.VoteAccuracy(),
+			"voteAccuracy":    s.VoteAccuracy(),
 		})
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"ratings": list, "scale": rating.ScoreScale})
@@ -3043,33 +3105,32 @@ func (h *Handler) PingPeer(w http.ResponseWriter, r *http.Request) {
 
 	// Simple ping implementation - measure connection time
 	start := time.Now()
-	
+
 	// Try to connect to the peer's HTTP endpoint
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 	}
-	
+
 	// Convert WebSocket address to HTTP
 	httpAddr := address
 	if len(httpAddr) > 2 && httpAddr[:2] == "ws" {
 		httpAddr = "http" + httpAddr[2:]
 	}
-	
+
 	resp, err := client.Get(httpAddr + "/")
 	duration := time.Since(start)
-	
+
 	var ping *int64
 	if err == nil && resp != nil {
 		resp.Body.Close()
 		pingMs := duration.Milliseconds()
 		ping = &pingMs
 	}
-	
+
 	response := map[string]interface{}{
 		"address": address,
 		"ping":    ping,
 	}
-	
+
 	jsonResponse(w, http.StatusOK, response)
 }
-
