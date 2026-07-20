@@ -326,8 +326,9 @@ func mapToTx(m map[string]interface{}) *blockchain.Transaction {
 
 const microPLPPerPLP = 1_000_000.0
 
-// parseAmountToUplp normalizes Gateway JSON amount to integer μPLP.
-// Integer 135 → 135 μPLP. Decimal 0.001 (PLP) → 1000 μPLP.
+// parseAmountToUplp requires integer μPLP. Fractional PLP (0.001) must be converted
+// by the signer BEFORE hashing (0.001 PLP → amount=1000). Gateway must not rewrite
+// the signed amount or Core reports "Invalid signature".
 func parseAmountToUplp(raw interface{}) (uint64, error) {
 	switch v := raw.(type) {
 	case nil:
@@ -337,11 +338,10 @@ func parseAmountToUplp(raw interface{}) (uint64, error) {
 			return 0, fmt.Errorf("amount must be greater than 0")
 		}
 		if v != math.Trunc(v) {
-			uplp := uint64(math.Round(v * microPLPPerPLP))
-			if uplp == 0 {
-				return 0, fmt.Errorf("amount %v PLP rounds to 0 μPLP (1 PLP = 1e6 μPLP)", v)
-			}
-			return uplp, nil
+			return 0, fmt.Errorf(
+				"amount must be integer μPLP, got %v (PLP decimal). Convert before signing: amount_uplp = round(plp * 1e6), e.g. 0.001 PLP → 1000. Do not submit floats — rewriting after sign breaks the signature",
+				v,
+			)
 		}
 		return uint64(v), nil
 	case int:
@@ -386,8 +386,8 @@ func parseAmountToUplp(raw interface{}) (uint64, error) {
 	}
 }
 
-// normalizeCoreTxAmountField rewrites txData["amount"] to integer μPLP so Go uint64 unmarshal works.
-// Callers that sign must hash the same integer (see platarium-crypto amountToUplp).
+// normalizeCoreTxAmountField ensures amount is a JSON-friendly integer μPLP for Go unmarshal.
+// Does not convert PLP decimals (that would invalidate signatures).
 func normalizeCoreTxAmountField(txData map[string]interface{}) error {
 	uplp, err := parseAmountToUplp(txData["amount"])
 	if err != nil {
@@ -1593,7 +1593,7 @@ func (h *Handler) submitCoreSignedTx(w http.ResponseWriter, txData map[string]in
 	if err := normalizeCoreTxAmountField(txData); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{
 			"error": err.Error(),
-			"hint":  "amount is integer μPLP (1 PLP = 1_000_000 μPLP). Decimal 0.001 PLP → send 1000. Sign the integer μPLP, not the float.",
+			"hint":  "Sign and submit integer μPLP only. 0.001 PLP → amount=1000 (convert in the wallet/signer before hashing). Gateway will not rewrite a signed amount.",
 		})
 		return
 	}
@@ -1601,14 +1601,13 @@ func (h *Handler) submitCoreSignedTx(w http.ResponseWriter, txData map[string]in
 	if tx == nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{
 			"error": "Invalid Core-signed transaction",
-			"hint":  "amount must be integer μPLP after normalize; float PLP decimals are converted (0.001 → 1000) but signatures must cover that integer",
 		})
 		return
 	}
 	if tx.AmountUplp == 0 {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{
 			"error": "Invalid amount: amount must be greater than 0",
-			"hint":  "use μPLP integers (0.001 PLP = 1000 μPLP)",
+			"hint":  "use integer μPLP (0.001 PLP = 1000)",
 		})
 		return
 	}
