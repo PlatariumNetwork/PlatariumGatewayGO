@@ -936,31 +936,40 @@ const FaucetAddress = "faucet"
 // MelancholyFaucetAmountPLP is the default testnet faucet drip (whole PLP units).
 const MelancholyFaucetAmountPLP = 5000
 
+// MicroPLPPerPLP: on-chain PLP asset balances and tx amounts use μPLP (minimal units).
+const MicroPLPPerPLP = uint64(1_000_000)
+
 // InstantFaucetCredit applies testnet PLP directly via Core state-credit (no consensus).
+// plp is whole PLP; Core balance is credited in μPLP (plp * 1e6).
 func (bc *Blockchain) InstantFaucetCredit(to string, plp uint64) (*Transaction, error) {
 	if plp == 0 {
 		return nil, fmt.Errorf("faucet amount must be positive")
 	}
+	if plp > ^uint64(0)/MicroPLPPerPLP {
+		return nil, fmt.Errorf("faucet amount too large")
+	}
+	amountUplp := plp * MicroPLPPerPLP
 	bc.mu.RLock()
 	ledger := bc.ledger
 	bc.mu.RUnlock()
 	if ledger == nil {
 		return nil, fmt.Errorf("core ledger unavailable")
 	}
-	if err := ledger.Credit(to, plp, 0); err != nil {
+	// Credit PLP asset balance in minimal units (μPLP); fee μPLP wallet stays untouched.
+	if err := ledger.Credit(to, amountUplp, 0); err != nil {
 		return nil, err
 	}
 	tx := &Transaction{
 		Hash:       fmt.Sprintf("faucet-%d-%s", time.Now().UnixNano(), to),
 		From:       FaucetAddress,
 		To:         to,
-		Value:      strconv.FormatUint(plp, 10),
+		Value:      strconv.FormatUint(amountUplp, 10),
 		Fee:        "0",
 		Nonce:      0,
 		Timestamp:  time.Now().Unix(),
 		Type:       "faucet",
 		AssetType:  "native",
-		AmountUplp: plp,
+		AmountUplp: amountUplp,
 		FeeUplp:    0,
 	}
 	if err := bc.AddTransaction(tx); err != nil {
