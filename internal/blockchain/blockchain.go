@@ -202,18 +202,31 @@ type ConfirmedTxRef struct {
 // hydrating from RocksDB after restart.
 func (bc *Blockchain) ConfirmedTxRefsNewestFirst() []ConfirmedTxRef {
 	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-	if len(bc.blockHistory) == 0 {
+	blocks := append([]BlockRecord(nil), bc.blockHistory...)
+	bc.mu.RUnlock()
+	if len(blocks) == 0 && bc.RocksEnabled() {
+		if fromRocks, err := bc.listBlockHistoryFromRocks(); err == nil && len(fromRocks) > 0 {
+			blocks = fromRocks
+			// Cache into memory so subsequent calls are cheap.
+			bc.mu.Lock()
+			if len(bc.blockHistory) == 0 {
+				bc.blockHistory = append([]BlockRecord(nil), fromRocks...)
+				if head := int64(len(fromRocks)); head > bc.blockCounter {
+					bc.blockCounter = head
+				}
+			}
+			bc.mu.Unlock()
+		}
+	}
+	if len(blocks) == 0 {
 		return nil
 	}
-	blocks := append([]BlockRecord(nil), bc.blockHistory...)
 	sort.Slice(blocks, func(i, j int) bool {
 		return blocks[i].BlockNumber > blocks[j].BlockNumber
 	})
 	out := make([]ConfirmedTxRef, 0)
 	seen := make(map[string]bool)
 	for _, block := range blocks {
-		// Reverse within block so later-included txs appear first (closer to tip).
 		for i := len(block.TxHashes) - 1; i >= 0; i-- {
 			hash := block.TxHashes[i]
 			if hash == "" || seen[hash] {
@@ -345,6 +358,31 @@ func (bc *Blockchain) AddToMempool(tx *Transaction) error {
 	}
 	bc.mempool = append(bc.mempool, tx)
 	return nil
+}
+
+// HighestInFlightNonce returns the max nonce for address in mempool + L1 pending.
+// ok=false when the sender has no in-flight txs.
+func (bc *Blockchain) HighestInFlightNonce(address string) (int, bool) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	found := false
+	maxN := 0
+	consider := func(tx *Transaction) {
+		if tx == nil || tx.From != address {
+			return
+		}
+		if !found || tx.Nonce > maxN {
+			maxN = tx.Nonce
+			found = true
+		}
+	}
+	for _, tx := range bc.mempool {
+		consider(tx)
+	}
+	for _, tx := range bc.pendingBlock {
+		consider(tx)
+	}
+	return maxN, found
 }
 
 // GetMempool returns a deterministically ordered copy of pending transactions.
@@ -1041,7 +1079,8 @@ func (bc *Blockchain) NextBlockNumber() int64 {
 	return bc.blockCounter
 }
 
-// ApplyBlockHeader sets Core-assembled header fields on the last block in history.
+// ApplyBlockHeader sets Core-assembled header fields on the last block in history
+// and persists the explorer chain cache (chain.json) so restarts keep hashes + txs.
 func (bc *Blockchain) ApplyBlockHeader(blockNumber int64, header core.BlockHeader, producerNodeID string) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -1053,6 +1092,10 @@ func (bc *Blockchain) ApplyBlockHeader(blockNumber int64, header core.BlockHeade
 			bc.blockHistory[i].PreviousHash = header.PreviousHash
 			if producerNodeID != "" {
 				bc.blockHistory[i].ProducerNodeID = producerNodeID
+			}
+			if err := bc.persistChain(); err != nil {
+				// Non-fatal for consensus; RocksDB remains canonical when enabled.
+				_ = err
 			}
 			return
 		}

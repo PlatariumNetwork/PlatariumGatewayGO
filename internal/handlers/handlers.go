@@ -93,6 +93,10 @@ type Handler struct {
 	// clients cannot TOCTOU the same sender nonce. Persist is not done here.
 	mempoolAdmitMu sync.Mutex
 
+	// Next nonce to hand out per sender (exclusive high-water). Advanced only
+	// under mempoolAdmitMu via AllocateNonce — clients must not guess nonces.
+	nonceWatermark map[string]uint64
+
 	// Operator wallet (PLATARIUM_OPERATOR_WALLET): receives validation fee credits + Contributor XP.
 	operatorWallet        string
 	contributorsAPIURL    string
@@ -167,6 +171,7 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 		contributorsAPIURL:    rewards.ContributorsAPIURLFromEnv(),
 		networkID:             nonEmpty(os.Getenv("PLATARIUM_NETWORK_ID"), "melancholy-testnet"),
 		operatorRewardedBlock: make(map[uint64]bool),
+		nonceWatermark:        make(map[string]uint64),
 	}
 	if h.operatorWallet != "" {
 		log.Printf("[INFO] Operator wallet for node rewards: %s", h.operatorWallet)
@@ -1165,6 +1170,112 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		"uplp_balance":       account.UplpBalance,
 		"fee_spendable_uplp": account.FeeSpendableUplp,
 	})
+}
+
+// AllocateNonce reserves the next sender nonce under the admit mutex.
+// Nonce is part of the signed payload — the node cannot stamp it after signing.
+// Clients must: allocate → sign with returned nonce → submit; release on failed submit.
+func (h *Handler) AllocateNonce(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	var body struct {
+		Address string `json:"address"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	address := strings.TrimSpace(body.Address)
+	if !isValidFaucetAddress(address) {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid Platarium address"})
+		return
+	}
+	nonce, accountNonce, err := h.allocateNonceLocked(address)
+	if err != nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"address":      address,
+		"nonce":        nonce,
+		"accountNonce": accountNonce,
+		"hint":         "Sign the tx with this nonce, then POST /pg-sendtx. Call /api/nonce/release if submit fails before admit.",
+	})
+}
+
+// ReleaseNonce returns a previously allocated nonce that was never admitted
+// (e.g. sign/submit failed). Only the newest unused allocation is released.
+func (h *Handler) ReleaseNonce(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	var body struct {
+		Address string `json:"address"`
+		Nonce   uint64 `json:"nonce"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	address := strings.TrimSpace(body.Address)
+	if !isValidFaucetAddress(address) {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Invalid Platarium address"})
+		return
+	}
+	released := h.releaseNonceLocked(address, body.Nonce)
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"address":  address,
+		"nonce":    body.Nonce,
+		"released": released,
+	})
+}
+
+// allocateNonceLocked must be called with logic that takes mempoolAdmitMu.
+func (h *Handler) allocateNonceLocked(address string) (nonce uint64, accountNonce uint64, err error) {
+	h.mempoolAdmitMu.Lock()
+	defer h.mempoolAdmitMu.Unlock()
+	if h.blockchain.Ledger() == nil {
+		return 0, 0, fmt.Errorf("core ledger unavailable")
+	}
+	q, qerr := h.blockchain.GetAccountQuery(address)
+	if qerr != nil {
+		return 0, 0, qerr
+	}
+	accountNonce = q.Nonce
+	next := accountNonce
+	if high, ok := h.blockchain.HighestInFlightNonce(address); ok && uint64(high)+1 > next {
+		next = uint64(high) + 1
+	}
+	if wm, ok := h.nonceWatermark[address]; ok && wm > next {
+		next = wm
+	}
+	h.nonceWatermark[address] = next + 1
+	return next, accountNonce, nil
+}
+
+func (h *Handler) releaseNonceLocked(address string, nonce uint64) bool {
+	h.mempoolAdmitMu.Lock()
+	defer h.mempoolAdmitMu.Unlock()
+	wm, ok := h.nonceWatermark[address]
+	if !ok || wm != nonce+1 {
+		return false
+	}
+	// Do not release below confirmed account nonce or in-flight tip.
+	floor := uint64(0)
+	if q, err := h.blockchain.GetAccountQuery(address); err == nil {
+		floor = q.Nonce
+	}
+	if high, okHigh := h.blockchain.HighestInFlightNonce(address); okHigh && uint64(high)+1 > floor {
+		floor = uint64(high) + 1
+	}
+	if nonce < floor {
+		return false
+	}
+	h.nonceWatermark[address] = nonce
+	return true
 }
 
 // GetAccounts returns accounts ranked by PLP balance (Etherscan-style top accounts).
@@ -2927,10 +3038,14 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		block.PreviousHash = header.PreviousHash
 		block.ProducerNodeID = myId
 		if err := h.commitBlockToRocks(block, moved, header.StateRoot); err != nil {
-			logger.Warn("RocksDB commit after L2 confirm failed: %v", err)
+			logger.Error("RocksDB commit after L2 confirm FAILED (explorer may lose blocks on restart until fixed): %v", err)
 		}
 	} else {
 		logger.Warn("assemble-block failed after L2 confirm: %v", hdrErr)
+		// Still persist explorer cache without hashes so txs/blocks survive restart.
+		if err := h.blockchain.PersistChainSnapshot(); err != nil {
+			logger.Warn("Persist chain after L2 (no header) failed: %v", err)
+		}
 	}
 	logger.Info("L2 block confirmed confirmer=%s blockNumber=%d moved=%d totalFees=%d", shortId(myId), block.BlockNumber, len(moved), block.TotalFees)
 	if block.TotalFees > 0 {
@@ -3066,8 +3181,11 @@ func (h *Handler) ConfirmBlock(w http.ResponseWriter, r *http.Request) {
 		block.StateRoot = header.StateRoot
 		block.PreviousHash = header.PreviousHash
 		if err := h.commitBlockToRocks(block, moved, header.StateRoot); err != nil {
-			logger.Warn("RocksDB commit after legacy confirm failed: %v", err)
+			logger.Error("RocksDB commit after legacy confirm FAILED: %v", err)
 		}
+	} else {
+		logger.Warn("assemble-block failed after legacy confirm: %v", hdrErr)
+		_ = h.blockchain.PersistChainSnapshot()
 	}
 	if block.TotalFees > 0 {
 		h.distributor.ApplyBlock(block.TotalFees)
