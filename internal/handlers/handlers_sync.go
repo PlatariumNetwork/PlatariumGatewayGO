@@ -70,12 +70,20 @@ func (h *Handler) initChainPersistence(stateFile string) {
 		chainFile = blockchain.ChainFileFromStateFile(stateFile)
 	}
 	if chainFile != "" {
+		// Always register the path so L2 confirms keep writing the explorer cache,
+		// even when the file is missing on first boot or load fails.
+		h.blockchain.SetChainFile(chainFile)
 		if err := h.blockchain.LoadChainFile(chainFile); err != nil {
 			logger.Warn("Chain file load failed (%s): %v", chainFile, err)
 		} else {
-			h.blockchain.SetChainFile(chainFile)
 			head := h.blockchain.HeadBlockNumber()
-			logger.Info("Chain metadata loaded from %s (blocks=%d head=%d)", chainFile, len(h.blockchain.GetBlockHistory()), head)
+			logger.Info(
+				"Chain metadata loaded from %s (blocks=%d head=%d txs=%d)",
+				chainFile,
+				len(h.blockchain.GetBlockHistory()),
+				head,
+				h.blockchain.IndexedTransactionCount(),
+			)
 			h.rebuildDistributorTotalsFromChain()
 		}
 	}
@@ -109,8 +117,9 @@ func (h *Handler) initRocksFromChainFile(chainFile string) {
 		logger.Info("RocksDB canonical head=%d gatewayHead=%d", head, h.blockchain.HeadBlockNumber())
 	}
 
-	// Hydrate asynchronously so REST/WS can bind immediately. A full Rocks
-	// rebuild can take minutes (one CLI call per block/tx) and must not block Listen.
+	// Rebuild explorer tx/block index from Rocks (or refresh chain.json cache).
+	// Run async so Listen is not blocked on large histories, but always kick it
+	// when Rocks has a head OR the in-memory index lags blockHistory.
 	go h.hydrateExplorerIndexFromRocksIfNeeded()
 }
 
@@ -118,21 +127,54 @@ func (h *Handler) hydrateExplorerIndexFromRocksIfNeeded() {
 	if !h.blockchain.RocksEnabled() {
 		return
 	}
-	expected := h.blockchain.ExpectedConfirmedTxCount()
-	indexed := h.blockchain.IndexedTransactionCount()
-	if expected <= 0 || indexed == expected {
+	rocks := h.blockchain.RocksStore()
+	if rocks == nil {
 		return
 	}
-	logger.Info("Explorer index differs from canonical chain (%d indexed/%d expected) — hydrating from RocksDB…", indexed, expected)
+	head, err := rocks.RocksGetHead()
+	if err != nil {
+		logger.Warn("Explorer hydrate: RocksDB head failed: %v", err)
+		return
+	}
+
+	expected := h.blockchain.ExpectedConfirmedTxCount()
+	indexed := h.blockchain.IndexedTransactionCount()
+	historyLen := len(h.blockchain.GetBlockHistory())
+
+	// Nothing canonical yet — keep whatever chain.json already loaded.
+	if head == 0 && expected == 0 {
+		return
+	}
+
+	needsHydrate := head > 0 && (indexed < expected || indexed == 0 || historyLen == 0)
+	if !needsHydrate && head > 0 && indexed == expected && expected > 0 {
+		// Still refresh chain.json cache so restarts are instant.
+		if err := h.blockchain.PersistChainSnapshot(); err != nil {
+			logger.Warn("Persist explorer chain cache failed: %v", err)
+		}
+		return
+	}
+	if !needsHydrate {
+		return
+	}
+
+	logger.Info(
+		"Hydrating explorer from RocksDB (head=%d indexed=%d expected=%d history=%d)…",
+		head, indexed, expected, historyLen,
+	)
+	if err := h.blockchain.SyncFromRocksHead(); err != nil {
+		logger.Warn("Explorer hydrate SyncFromRocksHead failed: %v", err)
+	}
 	n, err := h.blockchain.HydrateExplorerIndexFromRocks()
 	if err != nil {
 		logger.Warn("Explorer index hydrate from RocksDB failed: %v", err)
 		return
 	}
-	logger.Info("Explorer index hydrated from RocksDB (%d txs)", n)
+	logger.Info("Explorer index hydrated from RocksDB (%d txs, blocks=%d)", n, len(h.blockchain.GetBlockHistory()))
 	if err := h.blockchain.PersistChainSnapshot(); err != nil {
 		logger.Warn("Persist explorer chain cache after hydrate failed: %v", err)
 	}
+	h.rebuildDistributorTotalsFromChain()
 }
 
 func (h *Handler) rebuildDistributorTotalsFromChain() {
@@ -148,6 +190,6 @@ func (h *Handler) rebuildDistributorTotalsFromChain() {
 	}
 	if burned > 0 || treasury > 0 {
 		h.distributor.SetTotals(burned, treasury)
-		logger.Info("Fee distribution totals rebuilt from chain: burned=%d treasury=%d (burn=%d%%)", burned, treasury, cfg.BurnPct)
+		logger.Info("Restored fee totals from chain: burned=%d treasury=%d", burned, treasury)
 	}
 }

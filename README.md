@@ -82,7 +82,7 @@ The gateway persists authoritative balances in a JSON state file managed by `pla
 |---------|-------------|
 | `-state-file PATH` | CLI flag; sets `PLATARIUM_STATE_FILE` for this process |
 | `PLATARIUM_STATE_FILE` | Path to Core state JSON (default: `data/core-state.json`) — **not canonical** for confirmed explorer reads when RocksDB is populated |
-| `PLATARIUM_CHAIN_FILE` | Legacy chain history JSON (default: derived from state file). **Not written** when RocksDB is enabled; used for one-time `migrate-json-to-rocks` |
+| `PLATARIUM_CHAIN_FILE` | Explorer restart cache (blocks + txs JSON). Always written on L2 confirm; RocksDB remains canonical when enabled |
 | `PLATARIUM_ROCKSDB_PATH` | Core RocksDB directory (default: `{state_dir}/rocksdb`). Canonical TX/block/account store |
 | `PLATARIUM_CLI_PATH` | Path to `platarium-cli` binary (auto-detected from `../PlatariumCore/target/release/`) |
 

@@ -167,6 +167,8 @@ func main() {
 	router.HandleFunc("/pg-tx/{hash}", handler.GetTransaction).Methods("GET")
 	router.HandleFunc("/pg-alltx/{address}", handler.GetTransactions).Methods("GET")
 	router.HandleFunc("/pg-sendtx", handler.SendTransaction).Methods("POST")
+	router.HandleFunc("/api/nonce/allocate", handler.AllocateNonce).Methods("POST")
+	router.HandleFunc("/api/nonce/release", handler.ReleaseNonce).Methods("POST")
 	// Demo UI: mempool, list all TX, demo send (mempool only), confirm block
 	router.HandleFunc("/api/mempool", handler.GetMempool).Methods("GET")
 	router.HandleFunc("/api/transactions", handler.GetAllTransactions).Methods("GET")
