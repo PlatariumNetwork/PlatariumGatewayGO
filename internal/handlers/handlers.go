@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -321,6 +322,79 @@ func mapToTx(m map[string]interface{}) *blockchain.Transaction {
 		return nil
 	}
 	return &tx
+}
+
+const microPLPPerPLP = 1_000_000.0
+
+// parseAmountToUplp normalizes Gateway JSON amount to integer μPLP.
+// Integer 135 → 135 μPLP. Decimal 0.001 (PLP) → 1000 μPLP.
+func parseAmountToUplp(raw interface{}) (uint64, error) {
+	switch v := raw.(type) {
+	case nil:
+		return 0, fmt.Errorf("missing amount: use integer μPLP (0.001 PLP = 1000)")
+	case float64:
+		if v <= 0 {
+			return 0, fmt.Errorf("amount must be greater than 0")
+		}
+		if v != math.Trunc(v) {
+			uplp := uint64(math.Round(v * microPLPPerPLP))
+			if uplp == 0 {
+				return 0, fmt.Errorf("amount %v PLP rounds to 0 μPLP (1 PLP = 1e6 μPLP)", v)
+			}
+			return uplp, nil
+		}
+		return uint64(v), nil
+	case int:
+		if v <= 0 {
+			return 0, fmt.Errorf("amount must be greater than 0")
+		}
+		return uint64(v), nil
+	case int64:
+		if v <= 0 {
+			return 0, fmt.Errorf("amount must be greater than 0")
+		}
+		return uint64(v), nil
+	case uint64:
+		if v == 0 {
+			return 0, fmt.Errorf("amount must be greater than 0")
+		}
+		return v, nil
+	case json.Number:
+		return parseAmountToUplp(string(v))
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0, fmt.Errorf("empty amount")
+		}
+		if strings.ContainsAny(s, ".eE") {
+			f, err := strconv.ParseFloat(s, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid amount %q", s)
+			}
+			return parseAmountToUplp(f)
+		}
+		u, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid amount %q", s)
+		}
+		if u == 0 {
+			return 0, fmt.Errorf("amount must be greater than 0")
+		}
+		return u, nil
+	default:
+		return 0, fmt.Errorf("unsupported amount type %T", raw)
+	}
+}
+
+// normalizeCoreTxAmountField rewrites txData["amount"] to integer μPLP so Go uint64 unmarshal works.
+// Callers that sign must hash the same integer (see platarium-crypto amountToUplp).
+func normalizeCoreTxAmountField(txData map[string]interface{}) error {
+	uplp, err := parseAmountToUplp(txData["amount"])
+	if err != nil {
+		return err
+	}
+	txData["amount"] = uplp
+	return nil
 }
 
 func txToMap(tx *blockchain.Transaction) map[string]interface{} {
@@ -1516,10 +1590,25 @@ func (h *Handler) submitCoreSignedTx(w http.ResponseWriter, txData map[string]in
 		})
 		return
 	}
+	if err := normalizeCoreTxAmountField(txData); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{
+			"error": err.Error(),
+			"hint":  "amount is integer μPLP (1 PLP = 1_000_000 μPLP). Decimal 0.001 PLP → send 1000. Sign the integer μPLP, not the float.",
+		})
+		return
+	}
 	tx := mapToTx(txData)
 	if tx == nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{
 			"error": "Invalid Core-signed transaction",
+			"hint":  "amount must be integer μPLP after normalize; float PLP decimals are converted (0.001 → 1000) but signatures must cover that integer",
+		})
+		return
+	}
+	if tx.AmountUplp == 0 {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{
+			"error": "Invalid amount: amount must be greater than 0",
+			"hint":  "use μPLP integers (0.001 PLP = 1000 μPLP)",
 		})
 		return
 	}
@@ -1552,6 +1641,8 @@ func (h *Handler) submitCoreSignedTx(w http.ResponseWriter, txData map[string]in
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":     true,
 		"transaction": tx,
+		"amount_uplp": tx.AmountUplp,
+		"amount_plp":  float64(tx.AmountUplp) / microPLPPerPLP,
 		"message":     "TX added to mempool",
 	})
 }
