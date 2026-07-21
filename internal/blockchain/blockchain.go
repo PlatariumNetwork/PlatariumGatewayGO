@@ -385,6 +385,23 @@ func (bc *Blockchain) HighestInFlightNonce(address string) (int, bool) {
 	return maxN, found
 }
 
+// HasInFlightNonce reports whether mempool or L1 pending already holds this sender nonce.
+func (bc *Blockchain) HasInFlightNonce(address string, nonce int) bool {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	for _, tx := range bc.mempool {
+		if tx != nil && tx.From == address && tx.Nonce == nonce {
+			return true
+		}
+	}
+	for _, tx := range bc.pendingBlock {
+		if tx != nil && tx.From == address && tx.Nonce == nonce {
+			return true
+		}
+	}
+	return false
+}
+
 // GetMempool returns a deterministically ordered copy of pending transactions.
 // Order is stable (timestamp, then sender, then nonce) so repeated reads and
 // reads across nodes never appear to "shuffle".
