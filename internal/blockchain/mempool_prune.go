@@ -2,6 +2,10 @@ package blockchain
 
 import "platarium-gateway-go/internal/logger"
 
+// MempoolMaxNonceGap matches PlatariumCore MEMPOOL_MAX_NONCE_GAP — parallel submits
+// may arrive out of order; do not prune txs within this window of the expected nonce.
+const MempoolMaxNonceGap = 64
+
 // PruneMempool removes stale entries: txs already in chain (memory or RocksDB),
 // duplicate (from, nonce) pairs, and txs that can never be packed (nonce behind
 // account or sitting behind a nonce gap). Without gap/stale pruning, Core
@@ -87,7 +91,7 @@ func (bc *Blockchain) PruneMempool() int {
 		kept = append(kept, tx)
 	}
 
-	// Drop anything sitting behind a nonce hole (e.g. have 7,8 but account expects 6).
+	// Drop stale nonces and txs too far ahead; keep in-gap futures (parallel HTTP submit).
 	if len(accountNonce) > 0 {
 		bySender := make(map[string][]*Transaction)
 		for _, tx := range kept {
@@ -99,7 +103,6 @@ func (bc *Blockchain) PruneMempool() int {
 		dropHash := make(map[string]bool)
 		for from, list := range bySender {
 			want := int(accountNonce[from])
-			// sort by nonce ascending (small N — insertion sort)
 			for i := 1; i < len(list); i++ {
 				j := i
 				for j > 0 && list[j-1].Nonce > list[j].Nonce {
@@ -107,24 +110,14 @@ func (bc *Blockchain) PruneMempool() int {
 					j--
 				}
 			}
-			expect := want
 			for _, tx := range list {
-				if tx.Nonce == expect {
-					expect++
-					continue
-				}
-				if tx.Nonce < expect {
+				if tx.Nonce < want {
 					dropHash[tx.Hash] = true
 					continue
 				}
-				// gap: drop this and every later nonce for this sender
-				dropHash[tx.Hash] = true
-				for _, rest := range list {
-					if rest.Nonce > tx.Nonce {
-						dropHash[rest.Hash] = true
-					}
+				if tx.Nonce > want+MempoolMaxNonceGap {
+					dropHash[tx.Hash] = true
 				}
-				break
 			}
 		}
 		if len(dropHash) > 0 {

@@ -586,6 +586,10 @@ func (h *Handler) onL1Vote(blockId, nodeId string, yes bool) {
 
 // voteRoundTimeout returns timeout for the vote round; scales with node count so many nodes have time to respond.
 func voteRoundTimeout(totalExpected int) time.Duration {
+	// Small testnet clusters (1–3 nodes): don't wait 5s per L1/L2 round.
+	if totalExpected <= 3 {
+		return 1200 * time.Millisecond
+	}
 	d := VoteRoundTimeoutMin + time.Duration(totalExpected)*VoteRoundTimeoutPerNode
 	if d > VoteRoundTimeoutMax {
 		d = VoteRoundTimeoutMax
