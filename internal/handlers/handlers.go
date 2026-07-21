@@ -93,9 +93,10 @@ type Handler struct {
 	// clients cannot TOCTOU the same sender nonce. Persist is not done here.
 	mempoolAdmitMu sync.Mutex
 
-	// Next nonce to hand out per sender (exclusive high-water). Advanced only
-	// under mempoolAdmitMu via AllocateNonce — clients must not guess nonces.
-	nonceWatermark map[string]uint64
+	// Soft-reserved nonces per sender (allocate → sign → submit). Holes from
+	// failed submits can be released independently — a single high-water mark
+	// used to cascade "expected 1, got 12" after parallel rejects.
+	nonceReserved map[string]map[uint64]struct{}
 
 	// Operator wallet (PLATARIUM_OPERATOR_WALLET): receives validation fee credits + Contributor XP.
 	operatorWallet        string
@@ -103,6 +104,8 @@ type Handler struct {
 	networkID             string
 	operatorRewardedMu    sync.Mutex
 	operatorRewardedBlock map[uint64]bool
+
+	exploreMetrics *exploreMetrics
 }
 
 type l2VoteRound struct {
@@ -171,7 +174,8 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 		contributorsAPIURL:    rewards.ContributorsAPIURLFromEnv(),
 		networkID:             nonEmpty(os.Getenv("PLATARIUM_NETWORK_ID"), "melancholy-testnet"),
 		operatorRewardedBlock: make(map[uint64]bool),
-		nonceWatermark:        make(map[string]uint64),
+		nonceReserved:         make(map[string]map[uint64]struct{}),
+		exploreMetrics:        newExploreMetrics(),
 	}
 	if h.operatorWallet != "" {
 		log.Printf("[INFO] Operator wallet for node rewards: %s", h.operatorWallet)
@@ -294,7 +298,15 @@ func (h *Handler) admitToMempool(tx *blockchain.Transaction) error {
 	if err := h.validateTxForMempool(tx); err != nil {
 		return err
 	}
-	return h.indexMempoolAdmission(tx)
+	if err := h.indexMempoolAdmission(tx); err != nil {
+		return err
+	}
+	// Reservation is consumed once the nonce is in mempool/pending.
+	h.clearReservedNonceLocked(tx.From, uint64(tx.Nonce))
+	if h.exploreMetrics != nil {
+		h.exploreMetrics.recordTxAccepted(tx.Hash)
+	}
+	return nil
 }
 
 func (h *Handler) onPendingBlockSync(pendingMaps []map[string]interface{}) {
@@ -1206,7 +1218,7 @@ func (h *Handler) AllocateNonce(w http.ResponseWriter, r *http.Request) {
 }
 
 // ReleaseNonce returns a previously allocated nonce that was never admitted
-// (e.g. sign/submit failed). Only the newest unused allocation is released.
+// (e.g. sign/submit failed). Any reserved nonce can be released (fills holes).
 func (h *Handler) ReleaseNonce(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
@@ -1233,6 +1245,9 @@ func (h *Handler) ReleaseNonce(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxNonceReserveAhead caps how far allocate may look past the account tip.
+const maxNonceReserveAhead = 256
+
 // allocateNonceLocked must be called with logic that takes mempoolAdmitMu.
 func (h *Handler) allocateNonceLocked(address string) (nonce uint64, accountNonce uint64, err error) {
 	h.mempoolAdmitMu.Lock()
@@ -1245,36 +1260,52 @@ func (h *Handler) allocateNonceLocked(address string) (nonce uint64, accountNonc
 		return 0, 0, qerr
 	}
 	accountNonce = q.Nonce
-	next := accountNonce
-	if high, ok := h.blockchain.HighestInFlightNonce(address); ok && uint64(high)+1 > next {
-		next = uint64(high) + 1
+	reserved := h.nonceReserved[address]
+	if reserved == nil {
+		reserved = make(map[uint64]struct{})
+		h.nonceReserved[address] = reserved
 	}
-	if wm, ok := h.nonceWatermark[address]; ok && wm > next {
-		next = wm
+	limit := accountNonce + maxNonceReserveAhead
+	for n := accountNonce; n <= limit; n++ {
+		if _, taken := reserved[n]; taken {
+			continue
+		}
+		if h.blockchain.HasInFlightNonce(address, int(n)) {
+			continue
+		}
+		reserved[n] = struct{}{}
+		return n, accountNonce, nil
 	}
-	h.nonceWatermark[address] = next + 1
-	return next, accountNonce, nil
+	return 0, accountNonce, fmt.Errorf("no free nonce within +%d of account tip %d", maxNonceReserveAhead, accountNonce)
+}
+
+func (h *Handler) clearReservedNonceLocked(address string, nonce uint64) {
+	if reserved, ok := h.nonceReserved[address]; ok {
+		delete(reserved, nonce)
+		if len(reserved) == 0 {
+			delete(h.nonceReserved, address)
+		}
+	}
 }
 
 func (h *Handler) releaseNonceLocked(address string, nonce uint64) bool {
 	h.mempoolAdmitMu.Lock()
 	defer h.mempoolAdmitMu.Unlock()
-	wm, ok := h.nonceWatermark[address]
-	if !ok || wm != nonce+1 {
+	reserved, ok := h.nonceReserved[address]
+	if !ok {
 		return false
 	}
-	// Do not release below confirmed account nonce or in-flight tip.
-	floor := uint64(0)
-	if q, err := h.blockchain.GetAccountQuery(address); err == nil {
-		floor = q.Nonce
-	}
-	if high, okHigh := h.blockchain.HighestInFlightNonce(address); okHigh && uint64(high)+1 > floor {
-		floor = uint64(high) + 1
-	}
-	if nonce < floor {
+	if _, held := reserved[nonce]; !held {
 		return false
 	}
-	h.nonceWatermark[address] = nonce
+	// Do not release a nonce already admitted (mempool/pending owns it).
+	if h.blockchain.HasInFlightNonce(address, int(nonce)) {
+		return false
+	}
+	delete(reserved, nonce)
+	if len(reserved) == 0 {
+		delete(h.nonceReserved, address)
+	}
 	return true
 }
 
@@ -1582,6 +1613,9 @@ func (h *Handler) SendTransaction(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if h.exploreMetrics != nil {
+		h.exploreMetrics.recordTxReceived()
+	}
 
 	// Platarium Wallet / Core dual-signature format (sig_main + sig_derived).
 	if getString(txData, "sig_main") != "" {
@@ -1741,6 +1775,9 @@ func (h *Handler) submitCoreSignedTx(w http.ResponseWriter, txData map[string]in
 		tx.Fee = strconv.FormatUint(tx.FeeUplp, 10)
 	}
 	if err := h.admitToMempool(tx); err != nil {
+		if h.exploreMetrics != nil {
+			h.exploreMetrics.recordTxRejected()
+		}
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2112,6 +2149,7 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 		"operatorWallet":  h.operatorWallet,
 		"networkId":       h.networkID,
 		"blockProposal":   blockProposal,
+		"liveMetrics":     h.exploreMetrics.snapshot(),
 		"rewardConfig": map[string]interface{}{
 			"burnPct":     cfg.BurnPct,
 			"treasuryPct": cfg.TreasuryPct,
@@ -2249,6 +2287,9 @@ func (h *Handler) DemoSendTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.admitToMempool(tx); err != nil {
+		if h.exploreMetrics != nil {
+			h.exploreMetrics.recordTxRejected()
+		}
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2680,6 +2721,9 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	h.pendingL1Beneficiary = myId
 	h.pendingL1Mu.Unlock()
 	moved := h.blockchain.L1CollectSelected(selected)
+	if h.exploreMetrics != nil && len(moved) > 0 {
+		h.exploreMetrics.recordL1Round()
+	}
 	logger.Info("L1 block collected proposer=%s moved=%d", shortId(myId), len(moved))
 	pendingBlockMaps := make([]map[string]interface{}, 0, len(moved))
 	for _, tx := range moved {
@@ -3048,6 +3092,9 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	logger.Info("L2 block confirmed confirmer=%s blockNumber=%d moved=%d totalFees=%d", shortId(myId), block.BlockNumber, len(moved), block.TotalFees)
+	if h.exploreMetrics != nil && len(moved) > 0 {
+		h.exploreMetrics.recordL2Confirm(txHashesFromTransactions(moved))
+	}
 	if block.TotalFees > 0 {
 		cfg := h.distributor.GetConfig()
 		sr := cfg.SplitBlockFees(block.TotalFees)
