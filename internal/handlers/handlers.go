@@ -290,15 +290,21 @@ func (h *Handler) indexMempoolAdmission(tx *blockchain.Transaction) error {
 	return nil
 }
 
-// admitToMempool runs Core mempool-admit + local index under a single mutex so
-// concurrent HTTP submits cannot race the same sender nonce (TOCTOU on snapshot).
+// admitToMempool validates via Core (parallel-safe subprocess) then inserts under
+// a narrow mutex. Splitting validation out of the critical section allows concurrent
+// HTTP submits to call platarium-cli in parallel; the mutex only guards mempool
+// insertion + nonce-reservation cleanup (both O(n) in-memory, very fast).
 func (h *Handler) admitToMempool(tx *blockchain.Transaction) error {
-	h.mempoolAdmitMu.Lock()
-	defer h.mempoolAdmitMu.Unlock()
+	// Phase 1: Core validation — no lock held; subprocess runs concurrently.
 	if err := h.validateTxForMempool(tx); err != nil {
 		return err
 	}
+
+	// Phase 2: Insert + reservation cleanup under narrow mutex.
+	h.mempoolAdmitMu.Lock()
+	defer h.mempoolAdmitMu.Unlock()
 	if err := h.indexMempoolAdmission(tx); err != nil {
+		// Duplicate nonce/hash detected after concurrent admit — not an error worth logging loudly.
 		return err
 	}
 	// Reservation is consumed once the nonce is in mempool/pending.
