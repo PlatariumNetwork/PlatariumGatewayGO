@@ -5,6 +5,33 @@ import (
 	"testing"
 )
 
+func TestMethodToCoreJSONIncludesEscrow(t *testing.T) {
+	tx := &Transaction{
+		Hash:       "abc",
+		From:       "PxA",
+		To:         "PxB",
+		SigMain:    "sm",
+		SigDerived: "sd",
+		Type:       "escrow_lock",
+		Asset:      "PLP",
+		AmountUplp: 1000,
+		FeeUplp:    1,
+		EscrowID:   "eid-1",
+		Purpose:    "contact",
+		ExpiresAt:  1893456000,
+		SettlePayee: "PxB",
+	}
+	js, ok := tx.ToCoreJSON()
+	if !ok {
+		t.Fatal("method ToCoreJSON failed")
+	}
+	for _, part := range []string{`"tx_kind":"escrow_lock"`, `"escrow_id":"eid-1"`, `"purpose":"contact"`, `"settle_payee":"PxB"`} {
+		if !strings.Contains(js, part) {
+			t.Fatalf("method ToCoreJSON missing %s in %s", part, js)
+		}
+	}
+}
+
 func TestToCoreJSONEscrowKinds(t *testing.T) {
 	tx := &Transaction{
 		Hash:       "h1",
