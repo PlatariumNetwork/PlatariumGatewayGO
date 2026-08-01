@@ -459,5 +459,27 @@ func (rc *RustCore) SignTransactionExt(
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(output), nil
+	signed := strings.TrimSpace(output)
+	if escrow != nil && escrow.TxKind != "" {
+		var check struct {
+			TxKind   string `json:"tx_kind"`
+			EscrowID string `json:"escrow_id"`
+		}
+		if err := json.Unmarshal([]byte(signed), &check); err != nil {
+			return "", fmt.Errorf("parse signed tx: %w", err)
+		}
+		if check.TxKind != escrow.TxKind {
+			return "", fmt.Errorf(
+				"Core signed tx missing tx_kind=%q (got %q): platarium-cli/RPC daemon is outdated or not restarted — rebuild PlatariumCore (`cargo build --release`) and restart the Core RPC process (kill platarium-cli serve / remove stale unix socket). Signing without escrow fields then admitting with tx_kind causes: Invalid signature: One or both signatures are invalid",
+				escrow.TxKind, check.TxKind,
+			)
+		}
+		if escrow.EscrowID != "" && check.EscrowID != escrow.EscrowID {
+			return "", fmt.Errorf(
+				"Core signed tx missing escrow_id=%q (got %q): restart/update platarium-cli RPC daemon",
+				escrow.EscrowID, check.EscrowID,
+			)
+		}
+	}
+	return signed, nil
 }
