@@ -65,6 +65,41 @@ func ToCoreJSON(tx *Transaction) (string, bool) {
 	if tx.PubDerived != "" {
 		m["pub_derived"] = tx.PubDerived
 	}
+	escrowKinds := tx.Type == "escrow_lock" || tx.Type == "escrow_settle" ||
+		tx.Type == "escrow_refund" || tx.Type == "escrow_cancel" ||
+		tx.Type == "contact_escrow_lock" || tx.Type == "contact_escrow_settle"
+	if escrowKinds {
+		m["tx_kind"] = tx.Type
+	}
+	rid := tx.EscrowID
+	if rid == "" {
+		rid = tx.RequestIDHash
+	}
+	if rid == "" && tx.ContractAddress != "" && escrowKinds {
+		rid = tx.ContractAddress
+	}
+	if rid != "" {
+		m["escrow_id"] = rid
+		m["request_id_hash"] = rid
+	}
+	if tx.Purpose != "" {
+		m["purpose"] = tx.Purpose
+	}
+	if tx.ExpiresAt > 0 {
+		m["expires_at"] = tx.ExpiresAt
+	}
+	if tx.SettleOutcomeKey != "" {
+		m["settle_outcome_key"] = tx.SettleOutcomeKey
+	}
+	if tx.SettleOutcome != nil {
+		m["settle_outcome"] = *tx.SettleOutcome
+	}
+	if tx.SettlePayee != "" {
+		m["settle_payee"] = tx.SettlePayee
+	}
+	if tx.SettleNode != "" {
+		m["settle_node"] = tx.SettleNode
+	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return "", false

@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
-// RustCore wraps the platarium-cli binary for cryptographic operations.
+// RustCore wraps Platarium Core — either a long-lived JSON-RPC daemon (default)
+// or platarium-cli subprocesses (PLATARIUM_CORE_MODE=cli).
 // The Gateway (Go) is the only component that connects to Core; clients and peers never talk to Core directly.
 type RustCore struct {
 	binaryPath string
@@ -17,54 +17,60 @@ type RustCore struct {
 }
 
 // NewRustCore creates a new RustCore instance (Gateway connects to Core; Core is used only via this package).
-// Mode: PLATARIUM_CORE_MODE=cli (default, subprocess) or rpc (JSON-RPC daemon via PLATARIUM_CORE_RPC_ADDR).
-// Binary resolution order: PLATARIUM_CLI_PATH env, then ../PlatariumCore/target/release/platarium-cli, then PATH.
+// Mode: PLATARIUM_CORE_MODE=rpc (default) or cli (subprocess per call).
+// RPC addr: PLATARIUM_CORE_RPC_ADDR (tcp host:port or unix:/path); default unix:/tmp/platarium-core.sock.
+// When RPC mode and daemon is down, Gateway auto-starts `platarium-cli serve` unless
+// PLATARIUM_CORE_RPC_AUTOSTART=0.
 func NewRustCore() (*RustCore, error) {
 	rc := &RustCore{}
 
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("PLATARIUM_CORE_MODE")))
+	if mode == "" {
+		mode = "rpc"
+	}
+
 	if mode == "rpc" {
-		addr := os.Getenv("PLATARIUM_CORE_RPC_ADDR")
-		if addr == "" {
-			addr = "127.0.0.1:19500"
+		addr := DefaultCoreRPCAddr()
+		autostart := strings.ToLower(strings.TrimSpace(os.Getenv("PLATARIUM_CORE_RPC_AUTOSTART")))
+		if autostart != "0" && autostart != "false" && autostart != "no" {
+			cliPath, _ := resolveCLIPath()
+			if err := EnsureCoreDaemon(cliPath, addr); err != nil {
+				return nil, fmt.Errorf("core rpc daemon: %w (set PLATARIUM_CORE_MODE=cli to use subprocesses)", err)
+			}
 		}
 		client, err := NewRPCClient(addr)
 		if err != nil {
 			return nil, err
 		}
+		if err := client.Ping(); err != nil {
+			return nil, fmt.Errorf("core rpc ping %s: %w", addr, err)
+		}
 		rc.rpcClient = client
+		rc.binaryPath, _ = resolveCLIPath()
 		return rc, nil
 	}
 
-	// 1) Explicit path from environment (for testnet and CI)
-	if path := os.Getenv("PLATARIUM_CLI_PATH"); path != "" {
-		if _, err := os.Stat(path); err == nil {
-			rc.binaryPath = path
-			return rc, nil
-		}
+	path, err := resolveCLIPath()
+	if err != nil {
+		return nil, err
 	}
+	rc.binaryPath = path
+	return rc, nil
+}
 
-	// 2) Relative to current working directory (e.g. when running from PlatariumGatewayGO)
-	binaryPath := filepath.Join("..", "PlatariumCore", "target", "release", "platarium-cli")
-	absPath, err := filepath.Abs(binaryPath)
-	if err == nil {
-		if _, err := os.Stat(absPath); err == nil {
-			rc.binaryPath = absPath
-			return rc, nil
-		}
+// Mode reports "rpc" or "cli".
+func (rc *RustCore) Mode() string {
+	if rc.rpcClient != nil {
+		return "rpc"
 	}
-	if _, err := os.Stat(binaryPath); err == nil {
-		rc.binaryPath = binaryPath
-		return rc, nil
-	}
+	return "cli"
+}
 
-	// 3) System PATH
-	if path, err := exec.LookPath("platarium-cli"); err == nil {
-		rc.binaryPath = path
-		return rc, nil
+// Close releases the persistent RPC connection (does not stop a shared Core daemon).
+func (rc *RustCore) Close() {
+	if rc.rpcClient != nil {
+		_ = rc.rpcClient.Close()
 	}
-
-	return nil, fmt.Errorf("platarium-cli binary not found. Set PLATARIUM_CLI_PATH or build: cd PlatariumCore && cargo build --release")
 }
 
 // normalizeSignatureHex returns the signature in the form Core verify-signature expects.
@@ -379,8 +385,32 @@ func (rc *RustCore) ValidateTransaction(txJSON string) (valid bool, err error) {
 		return false, fmt.Errorf("%s", out.Error)
 	}
 	return true, nil
-}// SignTransaction creates a full signed transaction via Core (mnemonic + alphanumeric). Returns the signed tx as JSON string (Core format).
+}
+
+// SignTransaction creates a full signed transaction via Core (mnemonic + alphanumeric). Returns the signed tx as JSON string (Core format).
+// Optional escrow fields are hashed into the signature (must match Transaction::compute_hash).
 func (rc *RustCore) SignTransaction(from, to, asset string, amount, feeUplp, nonce uint64, reads, writes []string, mnemonic, alphanumeric string) (signedTxJSON string, err error) {
+	return rc.SignTransactionExt(from, to, asset, amount, feeUplp, nonce, reads, writes, mnemonic, alphanumeric, nil)
+}
+
+// EscrowSignOpts optional fields for escrow_lock / escrow_settle.
+type EscrowSignOpts struct {
+	TxKind           string
+	EscrowID         string
+	Purpose          string
+	ExpiresAt        uint64
+	SettleOutcomeKey string
+	SettlePayee      string
+	SettleNode       string
+}
+
+func (rc *RustCore) SignTransactionExt(
+	from, to, asset string,
+	amount, feeUplp, nonce uint64,
+	reads, writes []string,
+	mnemonic, alphanumeric string,
+	escrow *EscrowSignOpts,
+) (signedTxJSON string, err error) {
 	if reads == nil {
 		reads = []string{}
 	}
@@ -401,6 +431,29 @@ func (rc *RustCore) SignTransaction(from, to, asset string, amount, feeUplp, non
 		"--writes", string(writesJSON),
 		"--mnemonic", mnemonic,
 		"--alphanumeric", alphanumeric,
+	}
+	if escrow != nil {
+		if escrow.TxKind != "" {
+			args = append(args, "--tx-kind", escrow.TxKind)
+		}
+		if escrow.EscrowID != "" {
+			args = append(args, "--escrow-id", escrow.EscrowID)
+		}
+		if escrow.Purpose != "" {
+			args = append(args, "--purpose", escrow.Purpose)
+		}
+		if escrow.ExpiresAt > 0 {
+			args = append(args, "--expires-at", fmt.Sprintf("%d", escrow.ExpiresAt))
+		}
+		if escrow.SettleOutcomeKey != "" {
+			args = append(args, "--settle-outcome-key", escrow.SettleOutcomeKey)
+		}
+		if escrow.SettlePayee != "" {
+			args = append(args, "--settle-payee", escrow.SettlePayee)
+		}
+		if escrow.SettleNode != "" {
+			args = append(args, "--settle-node", escrow.SettleNode)
+		}
 	}
 	output, err := rc.Execute(args)
 	if err != nil {

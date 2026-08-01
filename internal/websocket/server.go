@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"platarium-gateway-go/internal/blockchain"
+	"platarium-gateway-go/internal/contacteconomy"
 	"platarium-gateway-go/internal/nodes"
 
 	"github.com/google/uuid"
@@ -35,6 +36,7 @@ type Server struct {
 	mu           sync.RWMutex
 	server       *http.Server
 	messageHandler func(map[string]interface{}) // Handler for incoming peer messages
+	contactEconomy *contacteconomy.Store
 }
 
 // Client represents a WebSocket client connection
@@ -75,6 +77,13 @@ func NewServer(port int, bc *blockchain.Blockchain, nm *nodes.NodesManager) *Ser
 	nm.SetWSMessageHandler(s.HandleIncomingPeerMessage)
 
 	return s
+}
+
+// SetContactEconomy attaches first-contact protocol state (optional).
+func (s *Server) SetContactEconomy(store *contacteconomy.Store) {
+	s.mu.Lock()
+	s.contactEconomy = store
+	s.mu.Unlock()
 }
 
 // SetTLS enables HTTPS/WSS for the WebSocket server when cert and key paths are set.
@@ -237,6 +246,14 @@ func (s *Server) handleClientMessages(client *Client) {
 			s.handleDirectMessage(client, data)
 		case "e2eePubKeyRequest":
 			s.handleE2eePubKeyRequest(client, data)
+		case "protocolContactQuery":
+			s.handleProtocolContactQuery(client, data)
+		case "contactRequest":
+			s.handleContactRequestWS(client, data)
+		case "contactRespond":
+			s.handleContactRespondWS(client, data)
+		case "contactPricingAnnounce":
+			s.handleContactPricingAnnounce(client, data)
 		}
 	}
 }
