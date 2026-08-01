@@ -266,11 +266,17 @@ func parseSignedEscrowTx(signedJSON, defaultType string) (*blockchain.Transactio
 	}
 	kind := coreTx.TxKind
 	if kind == "" {
-		kind = defaultType
+		return nil, fmt.Errorf(
+			"signed tx missing tx_kind (expected %s): Core RPC daemon is outdated — rebuild platarium-cli and restart serve (pkill platarium-cli; rm core.sock)",
+			defaultType,
+		)
 	}
 	escrowID := coreTx.EscrowID
 	if escrowID == "" {
 		escrowID = coreTx.RequestIDHash
+	}
+	if escrowID == "" {
+		return nil, fmt.Errorf("signed tx missing escrow_id — update/restart platarium-cli")
 	}
 	tx := &blockchain.Transaction{
 		Hash:             coreTx.Hash,
