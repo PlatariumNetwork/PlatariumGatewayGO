@@ -21,6 +21,10 @@ export NODE_HOST="${NODE_HOST:-31.172.71.182}"
 export PLATARIUM_STATE_FILE="$ROOT/data/state.json"
 export PLATARIUM_CHAIN_FILE="$ROOT/data/chain.json"
 export PLATARIUM_ROCKSDB_PATH="$ROOT/data/rocksdb"
+# Long-lived Core RPC daemon (Unix socket) — avoids platarium-cli spawn per call.
+export PLATARIUM_CORE_MODE="${PLATARIUM_CORE_MODE:-rpc}"
+export PLATARIUM_CORE_RPC_ADDR="${PLATARIUM_CORE_RPC_ADDR:-unix:$ROOT/data/core.sock}"
+export PLATARIUM_CORE_BLOCK_CYCLE="${PLATARIUM_CORE_BLOCK_CYCLE:-1}"
 # Sole block producer for melancholy-testnet.
 export PLATARIUM_AUTO_BLOCK="${PLATARIUM_AUTO_BLOCK:-1}"
 

@@ -18,11 +18,13 @@ import (
 	"time"
 
 	"platarium-gateway-go/internal/blockchain"
+	"platarium-gateway-go/internal/contacteconomy"
 	"platarium-gateway-go/internal/core"
 	"platarium-gateway-go/internal/faucet"
 	"platarium-gateway-go/internal/logger"
 	"platarium-gateway-go/internal/nodes"
 	"platarium-gateway-go/internal/publicchannel"
+	"platarium-gateway-go/internal/ratelimit"
 	"platarium-gateway-go/internal/rating"
 	"platarium-gateway-go/internal/rewards"
 	"platarium-gateway-go/internal/websocket"
@@ -86,6 +88,8 @@ type Handler struct {
 
 	publicChannels     *publicchannel.Registry
 	publicChannelPosts *publicchannel.PostStore
+	contactEconomy     *contacteconomy.Store
+	contactRate        *ratelimit.Limiter
 
 	autoBlockMu sync.Mutex
 
@@ -128,7 +132,7 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 		log.Printf("[WARN] Rust Core not available: %v. Some features may be limited.", err)
 		rustCore = nil
 	} else {
-		log.Println("[INFO] Rust Core initialized successfully")
+		log.Printf("[INFO] Rust Core initialized successfully (mode=%s)", rustCore.Mode())
 	}
 
 	stateFile := os.Getenv("PLATARIUM_STATE_FILE")
@@ -193,9 +197,19 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 	}
 	h.faucetAmountPLP = faucetAmountFromEnv()
 	ensurePublicChannelRegistry(h)
+	ensureContactEconomy(h)
+	h.contactRate = ratelimit.New(40, time.Minute)
 	h.RegisterVoteCallbacks()
 	h.RegisterSyncCallbacks()
 	return h, nil
+}
+
+// Close releases Core RPC resources and stops an owned Core daemon if Gateway started it.
+func (h *Handler) Close() {
+	if h.rustCore != nil {
+		h.rustCore.Close()
+	}
+	core.StopOwnedCoreDaemon()
 }
 
 // RegisterVoteCallbacks registers L1/L2 proposal and vote callbacks with the nodes manager.
@@ -207,6 +221,8 @@ func (h *Handler) RegisterVoteCallbacks() {
 	h.nodesManager.SetL1BlockCollectedCallback(h.onL1BlockCollected)
 	h.nodesManager.SetPendingBlockSyncCallback(h.onPendingBlockSync)
 	h.nodesManager.SetMempoolAddCallback(h.onMempoolAdd)
+	h.nodesManager.SetDagVertexCallback(h.onDagVertex)
+	h.nodesManager.SetDagCommitCallback(h.onDagCommit)
 	h.nodesManager.SetL1VoteResultCallback(h.onL1VoteResult)
 	h.nodesManager.SetL2VoteResultCallback(h.onL2VoteResult)
 	h.nodesManager.SetFeeDistributionCallback(h.onFeeDistribution)
@@ -228,6 +244,24 @@ func (h *Handler) onMempoolAdd(txMap map[string]interface{}) {
 		logger.Warn("mempool:add rejected tx %s: %v", tx.Hash, err)
 		return
 	}
+}
+
+func (h *Handler) onDagVertex(payload map[string]interface{}) {
+	if !core.DagP2PEnabled() || h.rustCore == nil {
+		return
+	}
+	v, ok := core.VertexFromMap(payload)
+	if !ok {
+		logger.Warn("dag:vertex malformed payload")
+		return
+	}
+	res, err := h.rustCore.DagIngest(v)
+	if err != nil {
+		logger.Warn("dag_ingest %s: %v", v.ID, err)
+		return
+	}
+	logger.Info("dag:vertex ingest id=%s status=%s flushed=%d", shortId(v.ID), res.Status, len(res.Flushed))
+	h.maybeTryDagBatchCommit()
 }
 
 // validateTxForMempool delegates all consensus admission rules to PlatariumCore.

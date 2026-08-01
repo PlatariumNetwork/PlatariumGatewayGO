@@ -23,6 +23,21 @@ func TestCLICommandToMethod(t *testing.T) {
 	}
 }
 
+func TestParseRPCAddr(t *testing.T) {
+	n, a := ParseRPCAddr("unix:/tmp/x.sock")
+	if n != "unix" || a != "/tmp/x.sock" {
+		t.Fatalf("unix: %s %s", n, a)
+	}
+	n, a = ParseRPCAddr("127.0.0.1:19500")
+	if n != "tcp" || a != "127.0.0.1:19500" {
+		t.Fatalf("tcp: %s %s", n, a)
+	}
+	n, a = ParseRPCAddr("/var/run/core.sock")
+	if n != "unix" || a != "/var/run/core.sock" {
+		t.Fatalf("path: %s %s", n, a)
+	}
+}
+
 func TestNormalizeRPCOutputVerify(t *testing.T) {
 	out, err := normalizeRPCOutput("verify_signature", `{"verified":true}`)
 	if err != nil {

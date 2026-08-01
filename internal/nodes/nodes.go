@@ -59,6 +59,8 @@ type NodesManager struct {
 	l1BlockCollectedCB  func(l1BeneficiaryNodeId string) // who gets L1 reward when L2 confirms
 	pendingBlockSyncCB  func(pendingBlock []map[string]interface{}) // sync pending block so any node can run L2
 	mempoolAddCB        func(txMap map[string]interface{})           // add TX to local mempool (sync from peer)
+	dagVertexCB         func(vertex map[string]interface{})          // ingest Narwhal DAG vertex from peer
+	dagCommitCB         func(data map[string]interface{})            // cache DAG commit digests from peer
 	l1VoteResultCB      func(votes map[string]bool, accepted bool)
 	l2VoteResultCB      func(votes map[string]bool, accepted bool)
 	feeDistributionCB   func(data map[string]interface{})
@@ -287,6 +289,20 @@ func (nm *NodesManager) SetMempoolAddCallback(fn func(txMap map[string]interface
 	nm.voteCBMu.Lock()
 	defer nm.voteCBMu.Unlock()
 	nm.mempoolAddCB = fn
+}
+
+// SetDagVertexCallback sets callback for dag:vertex (Narwhal P2P ingest).
+func (nm *NodesManager) SetDagVertexCallback(fn func(vertex map[string]interface{})) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.dagVertexCB = fn
+}
+
+// SetDagCommitCallback sets callback for dag:commit (shared apply order).
+func (nm *NodesManager) SetDagCommitCallback(fn func(data map[string]interface{})) {
+	nm.voteCBMu.Lock()
+	defer nm.voteCBMu.Unlock()
+	nm.dagCommitCB = fn
 }
 
 // SetFeeDistributionCallback sets callback for fee_distribution (per-node fee shares from confirmer).
@@ -949,6 +965,18 @@ func (nm *NodesManager) handleBlockchainEvent(msg map[string]interface{}) {
 				nm.mempoolAddCB(txMap)
 				nm.voteCBMu.RLock()
 			}
+		}
+	case "dag:vertex":
+		if nm.dagVertexCB != nil {
+			nm.voteCBMu.RUnlock()
+			nm.dagVertexCB(payload)
+			nm.voteCBMu.RLock()
+		}
+	case "dag:commit":
+		if nm.dagCommitCB != nil {
+			nm.voteCBMu.RUnlock()
+			nm.dagCommitCB(payload)
+			nm.voteCBMu.RLock()
 		}
 	case "l1BlockCollected":
 		if nm.l1BlockCollectedCB != nil {

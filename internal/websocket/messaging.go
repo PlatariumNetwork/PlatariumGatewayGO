@@ -1,8 +1,12 @@
 package websocket
 
 import (
+	"encoding/json"
 	"log"
 	"time"
+
+	"platarium-gateway-go/internal/contacteconomy"
+	"platarium-gateway-go/internal/protocol"
 )
 
 // handleClientRegister handles client address registration
@@ -118,6 +122,21 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 			"type": "messageError",
 			"data": map[string]interface{}{
 				"error": "You must register your address first",
+			},
+		})
+		return
+	}
+
+	s.mu.RLock()
+	ce := s.contactEconomy
+	s.mu.RUnlock()
+	if ce != nil && !ce.CanSendFreeDM(from, to) {
+		log.Printf("[MESSAGE] First-contact gate: %s -> %s requires contact request + PLP lock", from, to)
+		sender.Conn.WriteJSON(map[string]interface{}{
+			"type": "messageError",
+			"data": map[string]interface{}{
+				"error": "protocol_contact_required",
+				"to":    to,
 			},
 		})
 		return
@@ -388,3 +407,206 @@ func (s *Server) broadcastE2eePubKeyAnnouncement(addr, publicKey string) {
 
 
 
+
+func (s *Server) handleProtocolContactQuery(client *Client, data map[string]interface{}) {
+	peerRaw, _ := data["peer"].(string)
+	requestID, _ := data["requestId"].(string)
+	from := client.Address
+	s.mu.RLock()
+	ce := s.contactEconomy
+	s.mu.RUnlock()
+	established := true
+	if ce != nil && ce.Config().Enabled {
+		established = ce.HasProtocolContact(from, peerRaw)
+	}
+	_ = client.Conn.WriteJSON(map[string]interface{}{
+		"type": "protocolContactResult",
+		"data": map[string]interface{}{
+			"peer":        normalizePlatariumAddress(peerRaw),
+			"established": established,
+			"requestId":   requestID,
+		},
+	})
+}
+
+func (s *Server) handleContactRequestWS(client *Client, data map[string]interface{}) {
+	s.mu.RLock()
+	ce := s.contactEconomy
+	s.mu.RUnlock()
+	if ce == nil {
+		_ = client.Conn.WriteJSON(map[string]interface{}{
+			"type": "contactRequestError",
+			"data": map[string]interface{}{"error": "contact economy unavailable"},
+		})
+		return
+	}
+	req := contacteconomy.ContactRequest{
+		RequestID:        strField(data, "requestId"),
+		Sender:           client.Address,
+		Receiver:         strField(data, "receiver"),
+		SenderPubKey:     strField(data, "senderPublicKey"),
+		ReceiverPubKey:   strField(data, "receiverPublicKey"),
+		EncryptedPayload: strField(data, "encryptedPayload"),
+		LockTxHash:       strField(data, "lockTxHash"),
+	}
+	if amt, ok := data["amountUplp"].(float64); ok {
+		req.AmountUplp = uint64(amt)
+	}
+	created, err := ce.CreateRequest(req)
+	if err != nil {
+		_ = client.Conn.WriteJSON(map[string]interface{}{
+			"type": "contactRequestError",
+			"data": map[string]interface{}{"error": err.Error()},
+		})
+		return
+	}
+	s.DeliverContactRequest(created)
+	_ = client.Conn.WriteJSON(map[string]interface{}{
+		"type": "contactRequestAck",
+		"data": map[string]interface{}{"request": created},
+	})
+}
+
+func (s *Server) handleContactRespondWS(client *Client, data map[string]interface{}) {
+	s.mu.RLock()
+	ce := s.contactEconomy
+	s.mu.RUnlock()
+	if ce == nil {
+		return
+	}
+	requestID := strField(data, "requestId")
+	outcome := strField(data, "outcome")
+	sig := strField(data, "signature")
+	enc := strField(data, "encryptedResponse")
+	req, err := ce.Respond(requestID, client.Address, outcome, sig)
+	if err != nil {
+		_ = client.Conn.WriteJSON(map[string]interface{}{
+			"type": "contactRespondError",
+			"data": map[string]interface{}{"error": err.Error()},
+		})
+		return
+	}
+	if outcome == contacteconomy.OutcomeAccepted {
+		ce.AddXP(client.Address, 25)
+		ce.AddXP(req.Sender, 10)
+	}
+	s.NotifyContactResolved(req, enc)
+	intent := protocol.ContactSettleFromRequest(req, "")
+	_ = client.Conn.WriteJSON(map[string]interface{}{
+		"type": "contactRespondAck",
+		"data": map[string]interface{}{
+			"request":      req,
+			"settleIntent": intent,
+		},
+	})
+}
+
+func (s *Server) handleContactPricingAnnounce(client *Client, data map[string]interface{}) {
+	s.mu.RLock()
+	ce := s.contactEconomy
+	s.mu.RUnlock()
+	if ce == nil {
+		return
+	}
+	p := contacteconomy.PricingAnnounce{
+		Address:   client.Address,
+		Signature: strField(data, "signature"),
+		Blocked:   false,
+	}
+	if v, ok := data["blocked"].(bool); ok {
+		p.Blocked = v
+	}
+	if v, ok := data["unknownFeeUplp"].(float64); ok {
+		p.UnknownFeeUplp = uint64(v)
+	}
+	if v, ok := data["verifiedFeeUplp"].(float64); ok {
+		p.VerifiedFeeUplp = uint64(v)
+	}
+	out, err := ce.SetPricing(p)
+	if err != nil {
+		_ = client.Conn.WriteJSON(map[string]interface{}{
+			"type": "contactPricingError",
+			"data": map[string]interface{}{"error": err.Error()},
+		})
+		return
+	}
+	_ = client.Conn.WriteJSON(map[string]interface{}{
+		"type": "contactPricingAck",
+		"data": map[string]interface{}{"pricing": out},
+	})
+}
+
+func strField(data map[string]interface{}, key string) string {
+	v, _ := data[key].(string)
+	return v
+}
+
+// DeliverContactRequest pushes ciphertext request to the receiver (online or offline buffer).
+func (s *Server) DeliverContactRequest(req contacteconomy.ContactRequest) {
+	payload := map[string]interface{}{
+		"type": "contactRequest",
+		"data": map[string]interface{}{
+			"requestId":         req.RequestID,
+			"sender":            req.Sender,
+			"receiver":          req.Receiver,
+			"senderPublicKey":   req.SenderPubKey,
+			"receiverPublicKey": req.ReceiverPubKey,
+			"encryptedPayload":  req.EncryptedPayload,
+			"timestamp":         req.Timestamp,
+			"expiresAt":         req.ExpiresAt,
+			"amountUplp":        req.AmountUplp,
+			"lockTxHash":        req.LockTxHash,
+		},
+	}
+	to := normalizePlatariumAddress(req.Receiver)
+	s.mu.RLock()
+	recipient, found := s.clientsByAddr[to]
+	s.mu.RUnlock()
+	if found && recipient != nil {
+		recipient.mu.Lock()
+		_ = recipient.Conn.WriteJSON(payload)
+		recipient.mu.Unlock()
+		return
+	}
+	// Buffer as offline message with special prefix so client can distinguish.
+	text, _ := json.Marshal(payload)
+	s.mu.Lock()
+	now := time.Now().Unix()
+	buf := s.offlineMessages[to]
+	buf = append(buf, OfflineMessage{
+		From:       req.Sender,
+		To:         to,
+		Text:       string(text),
+		Timestamp:  now,
+		BufferedAt: now,
+	})
+	s.offlineMessages[to] = buf
+	s.mu.Unlock()
+}
+
+// NotifyContactResolved notifies both parties of accept/reject.
+func (s *Server) NotifyContactResolved(req contacteconomy.ContactRequest, encryptedResponse string) {
+	payload := map[string]interface{}{
+		"type": "contactResolved",
+		"data": map[string]interface{}{
+			"requestId":          req.RequestID,
+			"status":             req.Status,
+			"settleOutcome":      req.SettleOutcome,
+			"sender":             req.Sender,
+			"receiver":           req.Receiver,
+			"encryptedResponse":  encryptedResponse,
+		},
+	}
+	for _, addr := range []string{req.Sender, req.Receiver} {
+		a := normalizePlatariumAddress(addr)
+		s.mu.RLock()
+		c := s.clientsByAddr[a]
+		s.mu.RUnlock()
+		if c == nil {
+			continue
+		}
+		c.mu.Lock()
+		_ = c.Conn.WriteJSON(payload)
+		c.mu.Unlock()
+	}
+}

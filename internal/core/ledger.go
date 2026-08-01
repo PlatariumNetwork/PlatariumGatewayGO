@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // AccountQuery is the parsed state-query response from platarium-cli.
@@ -98,6 +99,20 @@ func (ls *LedgerService) ApplyTx(txJSON string) (*ApplyTxResult, error) {
 		return &res, fmt.Errorf("%s", res.Error)
 	}
 	return &res, nil
+}
+
+// KernelApplyBatch runs execute+commit via Core kernel RPC (requires RPC mode).
+func (ls *LedgerService) KernelApplyBatch(coreTxJSONs []string) (*KernelCommitResult, error) {
+	parallel := true
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("PLATARIUM_KERNEL_PARALLEL"))); v == "0" || v == "false" || v == "no" {
+		parallel = false
+	}
+	return ls.rustCore.KernelApplyBatch(ls.stateFile, "l2-confirm", 0, coreTxJSONs, parallel)
+}
+
+// DagOrderDigests proxies to Core ephemeral DAG pack-and-order.
+func (ls *LedgerService) DagOrderDigests(producer string, digests []string) (*DagOrderDigestsResult, error) {
+	return ls.rustCore.DagOrderDigests(producer, digests)
 }
 
 // Credit funds an address in testnet mode (state-credit).

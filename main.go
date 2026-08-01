@@ -199,6 +199,20 @@ func main() {
 	router.HandleFunc("/api/public-channels/{address}/posts", handler.AppendPublicChannelPost).Methods("POST")
 	router.HandleFunc("/api/public-channels/{address}/posts", handler.ListPublicChannelPosts).Methods("GET")
 
+	// First-contact messaging economy (protocol contacts on Gateway; PLP escrow on Core)
+	router.HandleFunc("/api/contact/pricing", handler.GetContactPricing).Methods("GET")
+	router.HandleFunc("/api/contact/pricing", handler.SetContactPricing).Methods("POST")
+	router.HandleFunc("/api/contact/protocol", handler.QueryProtocolContact).Methods("GET")
+	router.HandleFunc("/api/contact/request", handler.CreateContactRequest).Methods("POST")
+	router.HandleFunc("/api/contact/respond", handler.RespondContactRequest).Methods("POST")
+	router.HandleFunc("/api/contact/requests", handler.ListContactRequests).Methods("GET")
+	router.HandleFunc("/api/contact/request/{id}", handler.GetContactRequestStatus).Methods("GET")
+	// Escrow API — status query + settle ack + real lock/settle submit (Core-signed)
+	router.HandleFunc("/api/escrow/lock", handler.SubmitEscrowLock).Methods("POST")
+	router.HandleFunc("/api/escrow/settle", handler.SubmitEscrowSettle).Methods("POST")
+	router.HandleFunc("/api/escrow/settled", handler.AckEscrowSettled).Methods("POST")
+	router.HandleFunc("/api/escrow/{id}", handler.GetEscrowStatus).Methods("GET")
+
 	// Serve index.html at root and /index.html (must be last to not interfere with other routes)
 	router.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./web/index.html")
@@ -266,6 +280,7 @@ func main() {
 	log.Println("Shutting down servers...")
 	wsServer.Stop()
 	restServer.Close()
+	handler.Close()
 	log.Println("Servers stopped")
 }
 

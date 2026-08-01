@@ -8,8 +8,8 @@ Full implementation in Go with P2P synchronization support between nodes.
 **Only the Gateway (Go) talks to Core.** Clients and other nodes do not communicate with Core directly.
 
 - **Clients / network** → send requests and transactions to **Gateway (Go)**.
-- **Gateway (Go)** → the only component that **connects to Platarium Core** (Rust): it calls `platarium-cli` for signature verification, key generation, etc.
-- **Core (Rust)** - cryptography and protocol; it has no server of its own and is used only by the Gateway.
+- **Gateway (Go)** → the only component that **connects to Platarium Core** (Rust): by default it talks to a **long-lived Core RPC daemon** (`platarium-cli serve`) over a Unix socket or TCP. Set `PLATARIUM_CORE_MODE=cli` to fall back to one subprocess per call.
+- **Core (Rust)** - cryptography and protocol; runs as `platarium-cli serve` (JSON-RPC over Unix/TCP). Gateway auto-starts the daemon when needed.
 
 In testnet mode the Gateway decides when to call Core to validate TX; clients simply submit TX to the REST/WS Gateway.
 
@@ -74,9 +74,38 @@ In testnet mode:
 - **Balances and nonces** come from **Platarium Core state file** (not in-memory Go maps). Mempool admission uses `state-validate-tx`; L2 confirmation applies via `state-apply-tx`.
 - This verifies that transactions are validated correctly by the Core before being accepted and distributed.
 
+### Core RPC daemon (default)
+
+By default Gateway uses **`PLATARIUM_CORE_MODE=rpc`**: a long-lived `platarium-cli serve` process with a persistent connection (Unix socket preferred).
+
+| Setting | Description |
+|---------|-------------|
+| `PLATARIUM_CORE_MODE` | `rpc` (default) or `cli` (subprocess per call) |
+| `PLATARIUM_CORE_RPC_ADDR` | `unix:/path/to.sock` or `127.0.0.1:19500` (default: `unix:/tmp/platarium-core.sock`) |
+| `PLATARIUM_CORE_RPC_AUTOSTART` | `1` (default): Gateway starts `platarium-cli serve` if ping fails |
+| `PLATARIUM_CORE_BLOCK_CYCLE` | `1` / `0` / unset. Unset = auto (RPC + no peers). One Core RTT for pack→L1→assemble→votes |
+| `PLATARIUM_KERNEL_EXEC` | **on by default**. L2 confirm applies Core-compatible txs via `kernel_execute_batch` + `kernel_commit_diff`. Set `0` only to force legacy per-tx apply. Faucet/mixed blocks still use legacy Credit/per-tx |
+| `PLATARIUM_KERNEL_PARALLEL` | `1` (default when kernel exec on) or `0` to force sequential waves |
+| `PLATARIUM_DAG_ORDERING` | **on by default**. Set `0` only to disable L1/L2 digest reorder via Core `dag_order_digests` |
+| `PLATARIUM_DAG_P2P` | **on by default**. Set `0` only to disable propose+gossip of `dag:vertex` |
+
+Manual daemon (optional if autostart disabled):
+
+```bash
+platarium-cli serve --listen unix:/tmp/platarium-core.sock
+# or: platarium-cli serve --listen 127.0.0.1:19500
+```
+
+Unified cycle method (JSON-RPC): `block_cycle` — select mempool txs, L1 verify, assemble block, optional auto-confirm votes, optional apply/commit.
+
+Kernel methods (JSON-RPC): `kernel_execute_batch` (read-only StateDiff), `kernel_commit_diff` (apply account post-images). **On by default** for L2 confirm; set `PLATARIUM_KERNEL_EXEC=0` only as kill-switch.
+
+DAG methods (JSON-RPC): `dag_insert`, `dag_linearize`, `dag_try_commit`, `dag_to_batch`, `dag_order_digests`, `dag_propose`, `dag_ingest`, `dag_ensure_genesis`, `dag_try_commit_batches`, `dag_last_commit`, `dag_reset`.  
+Shared genesis author `platarium-genesis` is identical on every node. After batch commit, digests are cached and gossiped as `dag:commit` so L2 apply uses the same order. DAG reorder + peer gossip are **on by default**; set `PLATARIUM_DAG_ORDERING=0` / `PLATARIUM_DAG_P2P=0` only as kill-switches.
+
 ### Core state file
 
-The gateway persists authoritative balances in a JSON state file managed by `platarium-cli` (mempool admission + apply during confirmation):
+The gateway persists authoritative balances in a JSON state file managed by Core (mempool admission + apply during confirmation):
 
 | Setting | Description |
 |---------|-------------|

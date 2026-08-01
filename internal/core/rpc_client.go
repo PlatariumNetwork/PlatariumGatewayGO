@@ -5,29 +5,93 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
 )
 
 // RPCClient talks to platarium-cli serve over newline-delimited JSON-RPC 2.0.
+// Keeps a persistent connection (TCP or Unix) and reconnects on failure.
 type RPCClient struct {
-	addr string
-	mu   sync.Mutex
-	id   int64
+	addr    string // dial target: host:port or unix path
+	network string // "tcp" or "unix"
+	mu      sync.Mutex
+	id      int64
+	conn    net.Conn
+	reader  *bufio.Reader
 }
 
-// NewRPCClient connects to Core RPC daemon at addr (e.g. 127.0.0.1:19500).
-func NewRPCClient(addr string) (*RPCClient, error) {
+// ParseRPCAddr returns network ("tcp"|"unix") and dial address.
+// Accepts: "127.0.0.1:19500", "tcp://127.0.0.1:19500", "unix:/tmp/x.sock", "/tmp/x.sock".
+func ParseRPCAddr(addr string) (network, dialAddr string) {
+	addr = strings.TrimSpace(addr)
 	if addr == "" {
-		addr = "127.0.0.1:19500"
+		return "tcp", "127.0.0.1:19500"
 	}
-	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if strings.HasPrefix(addr, "unix:") {
+		return "unix", strings.TrimPrefix(addr, "unix:")
+	}
+	if strings.HasPrefix(addr, "tcp://") {
+		return "tcp", strings.TrimPrefix(addr, "tcp://")
+	}
+	if strings.HasPrefix(addr, "/") || strings.HasPrefix(addr, "./") {
+		return "unix", addr
+	}
+	return "tcp", addr
+}
+
+// NewRPCClient connects to Core RPC daemon at addr (TCP host:port or unix:/path).
+func NewRPCClient(addr string) (*RPCClient, error) {
+	network, dialAddr := ParseRPCAddr(addr)
+	c := &RPCClient{addr: dialAddr, network: network}
+	if err := c.connectLocked(); err != nil {
+		// Allow construction even if daemon is not up yet (auto-start will retry).
+		// First Call will reconnect.
+		_ = err
+	}
+	return c, nil
+}
+
+func (c *RPCClient) connectLocked() error {
+	if c.conn != nil {
+		_ = c.conn.Close()
+		c.conn = nil
+		c.reader = nil
+	}
+	conn, err := net.DialTimeout(c.network, c.addr, 3*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("core rpc dial %s: %w", addr, err)
+		return fmt.Errorf("core rpc dial %s %s: %w", c.network, c.addr, err)
 	}
-	_ = conn.Close()
-	return &RPCClient{addr: addr}, nil
+	c.conn = conn
+	c.reader = bufio.NewReaderSize(conn, 1024*1024)
+	return nil
+}
+
+func (c *RPCClient) ensureConnLocked() error {
+	if c.conn != nil {
+		return nil
+	}
+	return c.connectLocked()
+}
+
+// Ping checks the daemon is reachable.
+func (c *RPCClient) Ping() error {
+	_, err := c.Call("ping", map[string]interface{}{})
+	return err
+}
+
+// Close releases the persistent connection.
+func (c *RPCClient) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		err := c.conn.Close()
+		c.conn = nil
+		c.reader = nil
+		return err
+	}
+	return nil
 }
 
 func cliCommandToMethod(command string) string {
@@ -71,24 +135,40 @@ func (c *RPCClient) Call(method string, params map[string]interface{}) (string, 
 		return "", err
 	}
 
-	conn, err := net.DialTimeout("tcp", c.addr, 5*time.Second)
+	out, err := c.roundTripLocked(reqBytes)
 	if err != nil {
-		return "", fmt.Errorf("core rpc dial: %w", err)
+		// One reconnect retry.
+		if reconnErr := c.connectLocked(); reconnErr != nil {
+			return "", err
+		}
+		out, err = c.roundTripLocked(reqBytes)
+		if err != nil {
+			return "", err
+		}
 	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	return out, nil
+}
 
-	if _, err := fmt.Fprintf(conn, "%s\n", reqBytes); err != nil {
+func (c *RPCClient) roundTripLocked(reqBytes []byte) (string, error) {
+	if err := c.ensureConnLocked(); err != nil {
+		return "", err
+	}
+	_ = c.conn.SetDeadline(time.Now().Add(60 * time.Second))
+	if _, err := fmt.Fprintf(c.conn, "%s\n", reqBytes); err != nil {
+		_ = c.conn.Close()
+		c.conn = nil
+		c.reader = nil
 		return "", err
 	}
 
-	scanner := bufio.NewScanner(conn)
-	// Large mempool / L1 verify JSON can exceed the default 64KiB token limit.
-	scanner.Buffer(make([]byte, 0, 1024*1024), 32*1024*1024)
-	if !scanner.Scan() {
-		return "", fmt.Errorf("core rpc: empty response")
+	line, err := c.reader.ReadString('\n')
+	if err != nil {
+		_ = c.conn.Close()
+		c.conn = nil
+		c.reader = nil
+		return "", fmt.Errorf("core rpc read: %w", err)
 	}
-	line := scanner.Text()
+	line = strings.TrimRight(line, "\r\n")
 
 	var resp struct {
 		ID     json.RawMessage `json:"id"`
@@ -108,7 +188,6 @@ func (c *RPCClient) Call(method string, params map[string]interface{}) (string, 
 		return "", nil
 	}
 
-	// Return compact JSON string (Execute callers expect JSON or CLI text).
 	var asString string
 	if err := json.Unmarshal(resp.Result, &asString); err == nil {
 		return asString, nil
@@ -170,4 +249,16 @@ func normalizeRPCOutput(method, out string) (string, error) {
 	default:
 		return out, nil
 	}
+}
+
+// DefaultCoreRPCAddr returns listen/dial address for the Core daemon.
+func DefaultCoreRPCAddr() string {
+	if v := strings.TrimSpace(os.Getenv("PLATARIUM_CORE_RPC_ADDR")); v != "" {
+		return v
+	}
+	// Prefer Unix socket on local nodes (lower latency than TCP loopback).
+	if v := strings.TrimSpace(os.Getenv("PLATARIUM_CORE_RPC_SOCK")); v != "" {
+		return "unix:" + v
+	}
+	return "unix:/tmp/platarium-core.sock"
 }

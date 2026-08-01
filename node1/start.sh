@@ -21,6 +21,10 @@ export NODE_HOST="${NODE_HOST:-31.172.71.182}"
 export PLATARIUM_STATE_FILE="$ROOT/data/state.json"
 export PLATARIUM_CHAIN_FILE="$ROOT/data/chain.json"
 export PLATARIUM_ROCKSDB_PATH="$ROOT/data/rocksdb"
+# Own Core RPC socket (follower still needs Core for admits/reads).
+export PLATARIUM_CORE_MODE="${PLATARIUM_CORE_MODE:-rpc}"
+export PLATARIUM_CORE_RPC_ADDR="${PLATARIUM_CORE_RPC_ADDR:-unix:$ROOT/data/core.sock}"
+export PLATARIUM_CORE_BLOCK_CYCLE=0
 export PEERS="${PEERS:-[\"ws://127.0.0.1:1813\"]}"
 # Follower only: node0 is the sole L1/L2 block producer. Dual auto-block races
 # drop the same mempool txs on both nodes and makes explorer txs "disappear".

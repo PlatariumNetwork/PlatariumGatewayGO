@@ -37,6 +37,15 @@ type Transaction struct {
 	Reads       []string `json:"reads,omitempty"`
 	Writes      []string `json:"writes,omitempty"`
 	BlockNumber int64    `json:"blockNumber,omitempty"`
+	// Generic escrow (opaque financial settlement; no social graph)
+	RequestIDHash     string `json:"request_id_hash,omitempty"`
+	EscrowID          string `json:"escrow_id,omitempty"`
+	Purpose           string `json:"purpose,omitempty"`
+	ExpiresAt         int64  `json:"expires_at,omitempty"`
+	SettleOutcome     *uint8 `json:"settle_outcome,omitempty"`
+	SettleOutcomeKey  string `json:"settle_outcome_key,omitempty"`
+	SettlePayee       string `json:"settle_payee,omitempty"`
+	SettleNode        string `json:"settle_node,omitempty"`
 }
 
 // BlockRecord is a record for analytics (block number from 0, time, tx count, fees, L1/L2 votes, duration, miners).
@@ -77,6 +86,8 @@ type Blockchain struct {
 	totalFeesCollected int64 // total fees from all confirmed TX
 	chainFile          string
 	confirmedHashes    map[string]bool // hashes already in a confirmed block (guards re-admission)
+	dagCommitDigests   []string        // last DAG batch-commit order for L2 apply
+	dagCommitAnchor    string
 }
 
 // NewBlockchain creates a new blockchain instance
@@ -96,6 +107,29 @@ func (bc *Blockchain) SetLedger(ledger *core.LedgerService) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 	bc.ledger = ledger
+}
+
+// SetDagCommitDigests caches network DAG commit order for the next L2 apply.
+func (bc *Blockchain) SetDagCommitDigests(anchor string, digests []string) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	bc.dagCommitAnchor = anchor
+	bc.dagCommitDigests = append([]string(nil), digests...)
+}
+
+// DagCommitDigests returns a copy of the cached commit digest order.
+func (bc *Blockchain) DagCommitDigests() (anchor string, digests []string) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.dagCommitAnchor, append([]string(nil), bc.dagCommitDigests...)
+}
+
+// ClearDagCommitDigests clears the cached commit (e.g. after successful apply).
+func (bc *Blockchain) ClearDagCommitDigests() {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	bc.dagCommitAnchor = ""
+	bc.dagCommitDigests = nil
 }
 
 // Ledger returns the attached Core ledger service.
@@ -618,6 +652,42 @@ func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) error {
 		}
 	}
 
+	txs, err := bc.maybeDagReorder(ledger, txs)
+	if err != nil {
+		rollback()
+		return err
+	}
+
+	// Execution-first path (on by default): batch execute+commit.
+	// Falls back to per-tx apply when any faucet credit is present or Core JSON missing,
+	// or when PLATARIUM_KERNEL_EXEC=0.
+	if core.KernelExecEnabled() {
+		coreJSONs := make([]string, 0, len(txs))
+		useKernel := true
+		for _, tx := range txs {
+			if tx == nil {
+				continue
+			}
+			if tx.From == FaucetAddress {
+				useKernel = false
+				break
+			}
+			coreJSON, ok := ToCoreJSON(tx)
+			if !ok {
+				useKernel = false
+				break
+			}
+			coreJSONs = append(coreJSONs, coreJSON)
+		}
+		if useKernel && len(coreJSONs) > 0 {
+			if _, err := ledger.KernelApplyBatch(coreJSONs); err != nil {
+				rollback()
+				return fmt.Errorf("kernel apply batch: %w", err)
+			}
+			return nil
+		}
+	}
+
 	for _, tx := range txs {
 		if tx == nil {
 			continue
@@ -642,6 +712,60 @@ func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) error {
 		}
 	}
 	return nil
+}
+
+// maybeDagReorder reorders txs for L2 apply.
+// Prefer cached DAG commit digests; fall back to local dag_order_digests.
+func (bc *Blockchain) maybeDagReorder(ledger *core.LedgerService, txs []*Transaction) ([]*Transaction, error) {
+	if !core.DagOrderingEnabled() || len(txs) < 2 {
+		return txs, nil
+	}
+	for _, tx := range txs {
+		if tx != nil && tx.From == FaucetAddress {
+			return txs, nil
+		}
+	}
+	digests := make([]string, 0, len(txs))
+	for _, tx := range txs {
+		if tx == nil || tx.Hash == "" {
+			continue
+		}
+		digests = append(digests, tx.Hash)
+	}
+	if len(digests) < 2 {
+		return txs, nil
+	}
+
+	if _, commitDigests := bc.DagCommitDigests(); len(commitDigests) > 0 {
+		if overlap := core.DigestOverlapCount(commitDigests, digests); overlap > 0 {
+			ordered := core.PermuteByDigests(commitDigests, txs, func(tx *Transaction) string {
+				if tx == nil {
+					return ""
+				}
+				return tx.Hash
+			})
+			bc.ClearDagCommitDigests()
+			return ordered, nil
+		}
+	}
+
+	producer := os.Getenv("PLATARIUM_NODE_ID")
+	if producer == "" {
+		producer = "n0"
+	}
+	ordered, err := ledger.DagOrderDigests(producer, digests)
+	if err != nil {
+		return nil, fmt.Errorf("dag order digests: %w", err)
+	}
+	if ordered == nil || !ordered.OK || len(ordered.Digests) == 0 {
+		return txs, nil
+	}
+	return core.PermuteByDigests(ordered.Digests, txs, func(tx *Transaction) string {
+		if tx == nil {
+			return ""
+		}
+		return tx.Hash
+	}), nil
 }
 
 func copyFile(src, dst string) error {
