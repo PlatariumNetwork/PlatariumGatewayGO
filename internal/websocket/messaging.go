@@ -113,6 +113,16 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 		})
 		return
 	}
+	if len(text) > maxDirectMessageTextBytes {
+		log.Printf("[MESSAGE] Rejected oversized message from %s (%d bytes)", sender.ID, len(text))
+		sender.Conn.WriteJSON(map[string]interface{}{
+			"type": "messageError",
+			"data": map[string]interface{}{
+				"error": "Message too large",
+			},
+		})
+		return
+	}
 
 	to := normalizePlatariumAddress(toRaw)
 

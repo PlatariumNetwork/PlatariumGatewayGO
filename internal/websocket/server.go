@@ -16,10 +16,20 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
+	// Larger buffers help when relaying E2EE media (video notes up to ~8 MiB plaintext).
+	ReadBufferSize:  64 * 1024,
+	WriteBufferSize: 64 * 1024,
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow all origins
 	},
 }
+
+// Max inbound WebSocket frame for client + peer sockets.
+// Must cover base64 E2EE media (~8 MiB plaintext ≈ 11 MiB text) plus JSON envelope.
+const wsMaxMessageBytes = 16 * 1024 * 1024
+
+// Max length of message "text" field (E2EE ciphertext / base64 wire).
+const maxDirectMessageTextBytes = 12 * 1024 * 1024
 
 // Server represents the WebSocket server
 type Server struct {
@@ -124,6 +134,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("WebSocket upgrade error: %v", err)
 		return
 	}
+	conn.SetReadLimit(wsMaxMessageBytes)
 
 	// Detect peer connection
 	isPeer := r.URL.Query().Get("peer") == "1"
