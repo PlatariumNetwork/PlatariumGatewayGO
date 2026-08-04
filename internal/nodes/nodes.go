@@ -18,6 +18,9 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Align with websocket.Server wsMaxMessageBytes — E2EE media relay between peers.
+const peerWSMaxMessageBytes = 16 * 1024 * 1024
+
 // NodeInfo represents information about a connected peer node
 type NodeInfo struct {
 	NodeID  string `json:"nodeId"`
@@ -550,6 +553,7 @@ func (nm *NodesManager) tryConnect(address string) error {
 	if err != nil {
 		return err
 	}
+	conn.SetReadLimit(peerWSMaxMessageBytes)
 
 	log.Printf("[NODE] Connected to %s", address)
 
@@ -592,6 +596,7 @@ func (nm *NodesManager) HandleIncomingPeer(conn *websocket.Conn, address string)
 
 func (nm *NodesManager) handlePeerConnection(conn *websocket.Conn, address string) {
 	defer conn.Close()
+	conn.SetReadLimit(peerWSMaxMessageBytes)
 
 	// Set up heartbeat/ping-pong
 	conn.SetPongHandler(func(string) error {
