@@ -33,18 +33,18 @@ const maxDirectMessageTextBytes = 12 * 1024 * 1024
 
 // Server represents the WebSocket server
 type Server struct {
-	port         int
-	blockchain   *blockchain.Blockchain
-	nodesManager *nodes.NodesManager
-	tlsCertFile  string
-	tlsKeyFile   string
-	clients      map[string]*Client          // by client ID
-	clientsByAddr map[string]*Client         // by wallet address
-	offlineMessages map[string][]OfflineMessage // buffered messages for offline addresses
+	port            int
+	blockchain      *blockchain.Blockchain
+	nodesManager    *nodes.NodesManager
+	tlsCertFile     string
+	tlsKeyFile      string
+	clients         map[string]*Client            // by client ID (socket)
+	clientsByAddr   map[string]map[string]*Client // wallet address → clientID → client (multi-device)
+	offlineMessages map[string][]OfflineMessage   // buffered messages for offline addresses
 	// Last known X25519 public keys (base64) for messenger E2EE; kept after disconnect until overwritten.
-	e2eePubKeys map[string]string
-	mu           sync.RWMutex
-	server       *http.Server
+	e2eePubKeys    map[string]string
+	mu             sync.RWMutex
+	server         *http.Server
 	messageHandler func(map[string]interface{}) // Handler for incoming peer messages
 	contactEconomy *contacteconomy.Store
 }
@@ -56,6 +56,8 @@ type Client struct {
 	IPAddress   string
 	ConnectedAt time.Time
 	Address     string // Wallet address (Platarium address like Px...)
+	DeviceID    string // Stable per-browser device id (from client)
+	DeviceLabel string // User-visible label (e.g. "MacBook")
 	mu          sync.Mutex
 }
 
@@ -74,10 +76,10 @@ func NewServer(port int, bc *blockchain.Blockchain, nm *nodes.NodesManager) *Ser
 		port:         port,
 		blockchain:   bc,
 		nodesManager: nm,
-		clients:        make(map[string]*Client),
-		clientsByAddr:  make(map[string]*Client),
+		clients:         make(map[string]*Client),
+		clientsByAddr:   make(map[string]map[string]*Client),
 		offlineMessages: make(map[string][]OfflineMessage),
-		e2eePubKeys:    make(map[string]string),
+		e2eePubKeys:     make(map[string]string),
 	}
 
 	// Set local sockets getter
@@ -177,18 +179,24 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Cleanup on disconnect
 	defer func() {
 		s.mu.Lock()
-		// Remove from clients map
-		if client, exists := s.clients[clientID]; exists {
+		client, exists := s.clients[clientID]
+		if exists {
 			delete(s.clients, clientID)
-			// Remove from address map only if this client is still the one registered
-			// (same address may have reconnected as a new client)
-			if client.Address != "" && s.clientsByAddr[client.Address] == client {
-				delete(s.clientsByAddr, client.Address)
+			if client.Address != "" {
+				s.removeClientFromAddrLocked(client.Address, clientID)
 			}
+		}
+		addr := ""
+		if exists {
+			addr = client.Address
 		}
 		s.mu.Unlock()
 
 		log.Printf("[SOCKET] Client disconnected: %s", clientID)
+
+		if addr != "" {
+			s.broadcastDevicesUpdate(addr)
+		}
 
 		if s.nodesManager != nil {
 			s.nodesManager.AnnounceClientDisconnected(clientID)
@@ -255,6 +263,10 @@ func (s *Server) handleClientMessages(client *Client) {
 		case "message":
 			// Direct message between clients
 			s.handleDirectMessage(client, data)
+		case "devices:list":
+			s.handleDevicesList(client)
+		case "devices:logout":
+			s.handleDevicesLogout(client, data)
 		case "e2eePubKeyRequest":
 			s.handleE2eePubKeyRequest(client, data)
 		case "protocolContactQuery":

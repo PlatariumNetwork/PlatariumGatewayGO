@@ -3,13 +3,142 @@ package websocket
 import (
 	"encoding/json"
 	"log"
+	"strings"
 	"time"
 
 	"platarium-gateway-go/internal/contacteconomy"
 	"platarium-gateway-go/internal/protocol"
 )
 
-// handleClientRegister handles client address registration
+// --- multi-device helpers (callers must hold s.mu when using *Locked variants) ---
+
+func (s *Server) removeClientFromAddrLocked(address, clientID string) {
+	m := s.clientsByAddr[address]
+	if m == nil {
+		return
+	}
+	delete(m, clientID)
+	if len(m) == 0 {
+		delete(s.clientsByAddr, address)
+	}
+}
+
+func (s *Server) addClientToAddrLocked(address string, client *Client) {
+	m := s.clientsByAddr[address]
+	if m == nil {
+		m = make(map[string]*Client)
+		s.clientsByAddr[address] = m
+	}
+	// Same deviceId reconnecting: drop previous socket for that device.
+	if client.DeviceID != "" {
+		for id, c := range m {
+			if c != nil && c.DeviceID == client.DeviceID && c.ID != client.ID {
+				c.Address = ""
+				delete(m, id)
+				go func(old *Client) {
+					old.mu.Lock()
+					_ = old.Conn.WriteJSON(map[string]interface{}{
+						"type": "forceLogout",
+						"data": map[string]interface{}{
+							"reason": "device_replaced",
+						},
+					})
+					_ = old.Conn.Close()
+					old.mu.Unlock()
+				}(c)
+			}
+		}
+	}
+	m[client.ID] = client
+}
+
+func (s *Server) snapshotClientsForAddr(address string) []*Client {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.snapshotClientsForAddrLocked(address)
+}
+
+func (s *Server) snapshotClientsForAddrLocked(address string) []*Client {
+	m := s.clientsByAddr[address]
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]*Client, 0, len(m))
+	for _, c := range m {
+		if c != nil {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (s *Server) deviceEntriesForAddrLocked(address string) []map[string]interface{} {
+	m := s.clientsByAddr[address]
+	out := make([]map[string]interface{}, 0, len(m))
+	for _, c := range m {
+		if c == nil {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"deviceId":    c.DeviceID,
+			"deviceLabel": c.DeviceLabel,
+			"clientId":    c.ID,
+			"connectedAt": c.ConnectedAt.Unix(),
+		})
+	}
+	return out
+}
+
+func (s *Server) fanOutJSON(address string, payload map[string]interface{}) (okCount int) {
+	recipients := s.snapshotClientsForAddr(address)
+	var dead []*Client
+	for _, c := range recipients {
+		c.mu.Lock()
+		err := c.Conn.WriteJSON(payload)
+		c.mu.Unlock()
+		if err != nil {
+			dead = append(dead, c)
+			continue
+		}
+		okCount++
+	}
+	if len(dead) > 0 {
+		s.mu.Lock()
+		for _, c := range dead {
+			if c.Address != "" {
+				s.removeClientFromAddrLocked(c.Address, c.ID)
+			}
+			delete(s.clients, c.ID)
+		}
+		s.mu.Unlock()
+	}
+	return okCount
+}
+
+func (s *Server) broadcastDevicesUpdate(address string) {
+	if address == "" {
+		return
+	}
+	s.mu.RLock()
+	devices := s.deviceEntriesForAddrLocked(address)
+	recipients := s.snapshotClientsForAddrLocked(address)
+	s.mu.RUnlock()
+	payload := map[string]interface{}{
+		"type": "devices:update",
+		"data": map[string]interface{}{
+			"address":     address,
+			"deviceCount": len(devices),
+			"devices":     devices,
+		},
+	}
+	for _, c := range recipients {
+		c.mu.Lock()
+		_ = c.Conn.WriteJSON(payload)
+		c.mu.Unlock()
+	}
+}
+
+// handleClientRegister handles client address registration (multi-device safe).
 func (s *Server) handleClientRegister(client *Client, data map[string]interface{}) {
 	addressRaw, ok := data["address"].(string)
 	if !ok || addressRaw == "" {
@@ -18,36 +147,41 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 	}
 	address := normalizePlatariumAddress(addressRaw)
 
+	deviceID, _ := data["deviceId"].(string)
+	deviceLabel, _ := data["deviceLabel"].(string)
+	deviceID = strings.TrimSpace(deviceID)
+	deviceLabel = strings.TrimSpace(deviceLabel)
+	if deviceID == "" {
+		deviceID = client.ID
+	}
+	if deviceLabel == "" {
+		deviceLabel = "Device"
+	}
+
 	var announceAddr, announcePk string
 
 	s.mu.Lock()
-	// Another tab may still hold this address; drop stale mapping so only this socket receives.
-	if existing, ok := s.clientsByAddr[address]; ok && existing != nil && existing.ID != client.ID {
-		existing.Address = ""
-	}
-	// Remove old address mapping if exists
 	if client.Address != "" {
 		old := normalizePlatariumAddress(client.Address)
 		if old != address {
-			delete(s.clientsByAddr, old)
-			delete(s.clientsByAddr, client.Address)
+			s.removeClientFromAddrLocked(old, client.ID)
 		}
 	}
-
-	// Update client address
 	client.Address = address
-	s.clientsByAddr[address] = client
+	client.DeviceID = deviceID
+	client.DeviceLabel = deviceLabel
+	s.addClientToAddrLocked(address, client)
 	if pk, ok := data["e2eePublicKey"].(string); ok && pk != "" {
 		s.e2eePubKeys[address] = pk
 		announceAddr, announcePk = address, pk
 	}
-	// Take buffered offline messages (if any) for this address
 	pending := s.offlineMessages[address]
 	if len(pending) == 0 && addressRaw != address {
 		pending = s.offlineMessages[addressRaw]
 		delete(s.offlineMessages, addressRaw)
 	}
 	delete(s.offlineMessages, address)
+	devices := s.deviceEntriesForAddrLocked(address)
 	s.mu.Unlock()
 
 	now := time.Now().Unix()
@@ -59,19 +193,25 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 	}
 	pending = filtered
 
-	log.Printf("[MESSAGE] Client %s registered address: %s", client.ID[:8], address)
+	log.Printf("[MESSAGE] Client %s registered address: %s device=%s (%s) sessions=%d",
+		client.ID[:8], address, deviceID, deviceLabel, len(devices))
 
-	// Send confirmation
-	client.Conn.WriteJSON(map[string]interface{}{
+	client.mu.Lock()
+	_ = client.Conn.WriteJSON(map[string]interface{}{
 		"type": "registered",
 		"data": map[string]interface{}{
-			"address": address,
+			"address":          address,
+			"deviceId":         deviceID,
+			"deviceLabel":      deviceLabel,
+			"deviceCount":      len(devices),
+			"devices":          devices,
+			"ownDevicesOnline": devices,
 		},
 	})
+	client.mu.Unlock()
 
-	// Deliver any buffered messages to this client
 	if len(pending) > 0 {
-		log.Printf("[MESSAGE] Delivering %d buffered message(s) to %s", len(pending), address)
+		log.Printf("[MESSAGE] Delivering %d buffered message(s) to %s (device %s)", len(pending), address, deviceID)
 		for _, m := range pending {
 			msg := map[string]interface{}{
 				"type": "message",
@@ -92,12 +232,84 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 		}
 	}
 
+	s.broadcastDevicesUpdate(address)
+
 	if announcePk != "" {
 		go s.broadcastE2eePubKeyAnnouncement(announceAddr, announcePk)
 	}
 }
 
-// handleDirectMessage routes a message to the recipient by address
+func (s *Server) handleDevicesList(client *Client) {
+	addr := client.Address
+	if addr == "" {
+		return
+	}
+	s.mu.RLock()
+	devices := s.deviceEntriesForAddrLocked(addr)
+	s.mu.RUnlock()
+	client.mu.Lock()
+	_ = client.Conn.WriteJSON(map[string]interface{}{
+		"type": "devices:update",
+		"data": map[string]interface{}{
+			"address":     addr,
+			"deviceCount": len(devices),
+			"devices":     devices,
+		},
+	})
+	client.mu.Unlock()
+}
+
+func (s *Server) handleDevicesLogout(client *Client, data map[string]interface{}) {
+	if client.Address == "" {
+		return
+	}
+	targetDeviceID, _ := data["deviceId"].(string)
+	targetDeviceID = strings.TrimSpace(targetDeviceID)
+	if targetDeviceID == "" {
+		return
+	}
+	addr := client.Address
+
+	s.mu.Lock()
+	var target *Client
+	for _, c := range s.clientsByAddr[addr] {
+		if c != nil && c.DeviceID == targetDeviceID {
+			target = c
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if target == nil {
+		client.mu.Lock()
+		_ = client.Conn.WriteJSON(map[string]interface{}{
+			"type": "devices:logoutResult",
+			"data": map[string]interface{}{"ok": false, "error": "device_not_found"},
+		})
+		client.mu.Unlock()
+		return
+	}
+
+	target.mu.Lock()
+	_ = target.Conn.WriteJSON(map[string]interface{}{
+		"type": "forceLogout",
+		"data": map[string]interface{}{
+			"reason":   "remote_logout",
+			"deviceId": targetDeviceID,
+		},
+	})
+	_ = target.Conn.Close()
+	target.mu.Unlock()
+
+	client.mu.Lock()
+	_ = client.Conn.WriteJSON(map[string]interface{}{
+		"type": "devices:logoutResult",
+		"data": map[string]interface{}{"ok": true, "deviceId": targetDeviceID},
+	})
+	client.mu.Unlock()
+}
+
+// handleDirectMessage routes a message to all online devices of the recipient.
 func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}) {
 	toRaw, _ := data["to"].(string)
 	text, _ := data["text"].(string)
@@ -152,31 +364,43 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 		return
 	}
 
-	// Find recipient by address (normalized + raw fallback for legacy clients)
-	s.mu.RLock()
-	recipient, found := s.clientsByAddr[to]
-	if !found && toRaw != to {
-		recipient, found = s.clientsByAddr[toRaw]
+	recipients := s.snapshotClientsForAddr(to)
+	if len(recipients) == 0 && toRaw != to {
+		recipients = s.snapshotClientsForAddr(toRaw)
 	}
-	s.mu.RUnlock()
 
-	writeMessageSent := func(delivered bool) {
+	writeMessageSent := func(delivered bool, deviceCount int, devices []map[string]interface{}) {
+		s.mu.RLock()
+		ownDevices := s.deviceEntriesForAddrLocked(from)
+		s.mu.RUnlock()
 		sender.Conn.WriteJSON(map[string]interface{}{
 			"type": "messageSent",
 			"data": map[string]interface{}{
-				"to":        to,
-				"timestamp": time.Now().Unix(),
-				"delivered": delivered,
+				"to":               to,
+				"timestamp":        time.Now().Unix(),
+				"delivered":        delivered,
+				"deviceCount":      deviceCount,
+				"devices":          devices,
+				"ownDevicesOnline": ownDevices,
 			},
 		})
 	}
 
-	if !found {
-		// Recipient is offline on this node: buffer message for later delivery (up to 24h, see server.go TTL)
+	now := time.Now().Unix()
+	message := map[string]interface{}{
+		"type": "message",
+		"data": map[string]interface{}{
+			"from":      from,
+			"to":        to,
+			"text":      text,
+			"timestamp": now,
+		},
+	}
+
+	if len(recipients) == 0 {
 		log.Printf("[MESSAGE] Recipient %s offline on node, buffering (from %s)", to, from)
 		s.mu.Lock()
 		buf := s.offlineMessages[to]
-		now := time.Now().Unix()
 		buf = append(buf, OfflineMessage{
 			From:       from,
 			To:         to,
@@ -190,36 +414,22 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 		s.offlineMessages[to] = buf
 		s.mu.Unlock()
 
-		// Try to find recipient on peer nodes as well (for multi-node setups)
 		if s.nodesManager != nil {
 			s.routeMessageToPeer(to, from, text)
 		}
 
-		// Acknowledge to sender that message is accepted for delivery (buffered)
-		writeMessageSent(false)
+		writeMessageSent(false, 0, nil)
 		return
 	}
 
-	// Recipient is online locally: send message directly
-	now := time.Now().Unix()
-	message := map[string]interface{}{
-		"type": "message",
-		"data": map[string]interface{}{
-			"from":      from,
-			"to":        to,
-			"text":      text,
-			"timestamp": now,
-		},
-	}
+	okCount := s.fanOutJSON(to, message)
+	s.mu.RLock()
+	devices := s.deviceEntriesForAddrLocked(to)
+	s.mu.RUnlock()
 
-	recipient.mu.Lock()
-	err := recipient.Conn.WriteJSON(message)
-	recipient.mu.Unlock()
-
-	if err != nil {
-		log.Printf("[MESSAGE] Error sending message to %s (connection dead): %v; buffering for later", to, err)
+	if okCount == 0 {
+		log.Printf("[MESSAGE] All sessions dead for %s; buffering", to)
 		s.mu.Lock()
-		delete(s.clientsByAddr, to)
 		buf := s.offlineMessages[to]
 		buf = append(buf, OfflineMessage{
 			From:       from,
@@ -233,17 +443,29 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 		}
 		s.offlineMessages[to] = buf
 		s.mu.Unlock()
-		writeMessageSent(false)
+		writeMessageSent(false, 0, nil)
 		return
 	}
 
-	log.Printf("[MESSAGE] Message delivered from %s to %s", from, to)
+	log.Printf("[MESSAGE] Message delivered from %s to %s (%d/%d devices)", from, to, okCount, len(recipients))
+	writeMessageSent(true, okCount, devices)
 
-	// Send delivery confirmation to sender
-	writeMessageSent(true)
+	// Mirror to sender's other devices so multi-device outbox stays in sync.
+	if from != to {
+		s.mu.RLock()
+		own := s.snapshotClientsForAddrLocked(from)
+		s.mu.RUnlock()
+		for _, c := range own {
+			if c == nil || c.ID == sender.ID {
+				continue
+			}
+			c.mu.Lock()
+			_ = c.Conn.WriteJSON(message)
+			c.mu.Unlock()
+		}
+	}
 }
 
-// handleE2eePubKeyRequest returns a peer's last registered X25519 public key (base64) for E2EE.
 func (s *Server) handleE2eePubKeyRequest(client *Client, data map[string]interface{}) {
 	ofAddressRaw, _ := data["address"].(string)
 	requestID, _ := data["requestId"].(string)
@@ -270,10 +492,7 @@ func (s *Server) handleE2eePubKeyRequest(client *Client, data map[string]interfa
 	})
 }
 
-// routeMessageToPeer routes message to peer nodes if recipient is not local
 func (s *Server) routeMessageToPeer(to, from, text string) {
-	// Broadcast message to all peer nodes
-	// They will check if they have the recipient and forward if found
 	messageData := map[string]interface{}{
 		"type": "message:route",
 		"data": map[string]interface{}{
@@ -289,8 +508,6 @@ func (s *Server) routeMessageToPeer(to, from, text string) {
 	}
 }
 
-// HandleIncomingPeerMessage handles messages from peer nodes (called for eventType "message:route";
-// data is the event payload: from, to, text, timestamp - no "type" field).
 func (s *Server) HandleIncomingPeerMessage(data map[string]interface{}) {
 	toRaw, _ := data["to"].(string)
 	fromRaw, _ := data["from"].(string)
@@ -301,62 +518,52 @@ func (s *Server) HandleIncomingPeerMessage(data map[string]interface{}) {
 	to := normalizePlatariumAddress(toRaw)
 	from := normalizePlatariumAddress(fromRaw)
 
-	// Check if recipient is local
-	s.mu.RLock()
-	recipient, found := s.clientsByAddr[to]
-	s.mu.RUnlock()
-
-	if found {
-		// Deliver message to local recipient
-		message := map[string]interface{}{
-			"type": "message",
-			"data": map[string]interface{}{
-				"from":      from,
-				"to":        to,
-				"text":      text,
-				"timestamp": data["timestamp"],
-			},
-		}
-
-		recipient.mu.Lock()
-		recipient.Conn.WriteJSON(message)
-		recipient.mu.Unlock()
-
-		log.Printf("[MESSAGE] Message routed from peer: %s -> %s", from, to)
-	} else {
-		// Recipient offline on this node as well: buffer for later when they come online here
-		log.Printf("[MESSAGE] Recipient %s offline on this node (peer route), buffering message", to)
-		s.mu.Lock()
-		ts := int64(0)
-		switch v := data["timestamp"].(type) {
-		case int64:
-			ts = v
-		case float64:
-			ts = int64(v)
-		case int:
-			ts = int64(v)
-		}
-		if ts == 0 {
-			ts = time.Now().Unix()
-		}
-		queuedAt := time.Now().Unix()
-		buf := s.offlineMessages[to]
-		buf = append(buf, OfflineMessage{
-			From:       from,
-			To:         to,
-			Text:       text,
-			Timestamp:  ts,
-			BufferedAt: queuedAt,
-		})
-		if len(buf) > offlineMessageMaxPerRecipient {
-			buf = buf[len(buf)-offlineMessageMaxPerRecipient:]
-		}
-		s.offlineMessages[to] = buf
-		s.mu.Unlock()
+	message := map[string]interface{}{
+		"type": "message",
+		"data": map[string]interface{}{
+			"from":      from,
+			"to":        to,
+			"text":      text,
+			"timestamp": data["timestamp"],
+		},
 	}
+
+	ok := s.fanOutJSON(to, message)
+	if ok > 0 {
+		log.Printf("[MESSAGE] Message routed from peer: %s -> %s (%d devices)", from, to, ok)
+		return
+	}
+
+	log.Printf("[MESSAGE] Recipient %s offline on this node (peer route), buffering message", to)
+	s.mu.Lock()
+	ts := int64(0)
+	switch v := data["timestamp"].(type) {
+	case int64:
+		ts = v
+	case float64:
+		ts = int64(v)
+	case int:
+		ts = int64(v)
+	}
+	if ts == 0 {
+		ts = time.Now().Unix()
+	}
+	queuedAt := time.Now().Unix()
+	buf := s.offlineMessages[to]
+	buf = append(buf, OfflineMessage{
+		From:       from,
+		To:         to,
+		Text:       text,
+		Timestamp:  ts,
+		BufferedAt: queuedAt,
+	})
+	if len(buf) > offlineMessageMaxPerRecipient {
+		buf = buf[len(buf)-offlineMessageMaxPerRecipient:]
+	}
+	s.offlineMessages[to] = buf
+	s.mu.Unlock()
 }
 
-// LookupE2eePubKey returns the last registered X25519 public key for an address (if any).
 func (s *Server) LookupE2eePubKey(address string) string {
 	norm := normalizePlatariumAddress(address)
 	s.mu.RLock()
@@ -367,8 +574,6 @@ func (s *Server) LookupE2eePubKey(address string) string {
 	return s.e2eePubKeys[address]
 }
 
-// broadcastE2eePubKeyAnnouncement notifies all connected messenger clients so senders can encrypt
-// without polling when a recipient registers their key on this gateway.
 func (s *Server) broadcastE2eePubKeyAnnouncement(addr, publicKey string) {
 	if publicKey == "" || addr == "" {
 		return
@@ -395,28 +600,6 @@ func (s *Server) broadcastE2eePubKeyAnnouncement(addr, publicKey string) {
 		c.mu.Unlock()
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 func (s *Server) handleProtocolContactQuery(client *Client, data map[string]interface{}) {
 	peerRaw, _ := data["peer"].(string)
@@ -551,7 +734,6 @@ func strField(data map[string]interface{}, key string) string {
 	return v
 }
 
-// DeliverContactRequest pushes ciphertext request to the receiver (online or offline buffer).
 func (s *Server) DeliverContactRequest(req contacteconomy.ContactRequest) {
 	payload := map[string]interface{}{
 		"type": "contactRequest",
@@ -569,16 +751,9 @@ func (s *Server) DeliverContactRequest(req contacteconomy.ContactRequest) {
 		},
 	}
 	to := normalizePlatariumAddress(req.Receiver)
-	s.mu.RLock()
-	recipient, found := s.clientsByAddr[to]
-	s.mu.RUnlock()
-	if found && recipient != nil {
-		recipient.mu.Lock()
-		_ = recipient.Conn.WriteJSON(payload)
-		recipient.mu.Unlock()
+	if s.fanOutJSON(to, payload) > 0 {
 		return
 	}
-	// Buffer as offline message with special prefix so client can distinguish.
 	text, _ := json.Marshal(payload)
 	s.mu.Lock()
 	now := time.Now().Unix()
@@ -594,29 +769,20 @@ func (s *Server) DeliverContactRequest(req contacteconomy.ContactRequest) {
 	s.mu.Unlock()
 }
 
-// NotifyContactResolved notifies both parties of accept/reject.
 func (s *Server) NotifyContactResolved(req contacteconomy.ContactRequest, encryptedResponse string) {
 	payload := map[string]interface{}{
 		"type": "contactResolved",
 		"data": map[string]interface{}{
-			"requestId":          req.RequestID,
-			"status":             req.Status,
-			"settleOutcome":      req.SettleOutcome,
-			"sender":             req.Sender,
-			"receiver":           req.Receiver,
-			"encryptedResponse":  encryptedResponse,
+			"requestId":         req.RequestID,
+			"status":            req.Status,
+			"settleOutcome":     req.SettleOutcome,
+			"sender":            req.Sender,
+			"receiver":          req.Receiver,
+			"encryptedResponse": encryptedResponse,
 		},
 	}
 	for _, addr := range []string{req.Sender, req.Receiver} {
 		a := normalizePlatariumAddress(addr)
-		s.mu.RLock()
-		c := s.clientsByAddr[a]
-		s.mu.RUnlock()
-		if c == nil {
-			continue
-		}
-		c.mu.Lock()
-		_ = c.Conn.WriteJSON(payload)
-		c.mu.Unlock()
+		_ = s.fanOutJSON(a, payload)
 	}
 }
