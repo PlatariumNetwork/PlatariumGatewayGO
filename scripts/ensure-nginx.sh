@@ -81,15 +81,15 @@ DOMAIN="$(detect_domain)"
 
 build_cors_block() {
   local origin="$1"
-  if [[ -z "$origin" ]]; then
-    echo "    # CORS omitted (set NGINX_CORS_ORIGIN in .env.nginx)"
-    return
+  # First origin only (browser allows a single Access-Control-Allow-Origin value).
+  local primary="*"
+  if [[ -n "$origin" ]]; then
+    primary="${origin%%,*}"
+    primary="${primary%"${primary##*[![:space:]]}"}"
+    primary="${primary#"${primary%%[![:space:]]*}"}"
   fi
-  # First origin only for Access-Control-Allow-Origin (nginx single-value header).
-  local primary="${origin%%,*}"
-  primary="${primary%"${primary##*[![:space:]]}"}"
-  primary="${primary#"${primary%%[![:space:]]*}"}"
   cat <<EOF
+    # Single CORS value at the edge (hide upstream * from Go to avoid duplicate headers)
     add_header Access-Control-Allow-Origin "${primary}" always;
     add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
     add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With" always;
@@ -102,23 +102,36 @@ build_cors_block() {
 EOF
 }
 
+# Directives inside each proxy location — strip Go's CORS so nginx's add_header is alone.
+cors_proxy_hide() {
+  cat <<'EOF'
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        proxy_hide_header Access-Control-Max-Age;
+        proxy_hide_header Access-Control-Expose-Headers;
+EOF
+}
+
 CORS_BLOCK="$(build_cors_block "$CORS_ORIGIN")"
+CORS_HIDE="$(cors_proxy_hide)"
 
 fill_placeholders() {
   local src="$1" dest="$2"
-  local cors_esc rest_esc ws_esc
-  # CORS block may be multiline — use awk with ENVIRON
-  REST_PORT="$REST_PORT" WS_PORT="$WS_PORT" CORS_BLOCK="$CORS_BLOCK" \
+  REST_PORT="$REST_PORT" WS_PORT="$WS_PORT" CORS_BLOCK="$CORS_BLOCK" CORS_HIDE="$CORS_HIDE" \
   awk '
-    BEGIN { cors = ENVIRON["CORS_BLOCK"]; rest = ENVIRON["REST_PORT"]; ws = ENVIRON["WS_PORT"] }
+    BEGIN {
+      cors = ENVIRON["CORS_BLOCK"]
+      hide = ENVIRON["CORS_HIDE"]
+      rest = ENVIRON["REST_PORT"]
+      ws = ENVIRON["WS_PORT"]
+    }
     {
       line = $0
       gsub(/__REST_PORT__/, rest, line)
       gsub(/__WS_PORT__/, ws, line)
-      if (index(line, "__CORS_BLOCK__") > 0) {
-        print cors
-        next
-      }
+      if (index(line, "__CORS_BLOCK__") > 0) { print cors; next }
+      if (index(line, "__CORS_HIDE__") > 0) { print hide; next }
       print line
     }
   ' "$src" >"$dest"
@@ -132,6 +145,7 @@ cat >"$PROXY_BLOCK" <<EOF
 $(build_cors_block "$CORS_ORIGIN")
 
     location /ws {
+$(cors_proxy_hide)
         proxy_pass http://127.0.0.1:${WS_PORT}/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -147,6 +161,7 @@ $(build_cors_block "$CORS_ORIGIN")
     }
 
     location / {
+$(cors_proxy_hide)
         proxy_pass http://127.0.0.1:${REST_PORT};
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
