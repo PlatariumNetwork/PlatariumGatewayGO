@@ -42,6 +42,9 @@ Thumbs.db
 ecosystem.gateway.config.json
 ecosystem.gateway.config.cjs
 
+# Host-specific nginx proxy (see .env.nginx.example)
+.env.nginx
+
 # Split-node runtime (node0 / node1 keep their own data on the server)
 node0/data/
 node0/log/

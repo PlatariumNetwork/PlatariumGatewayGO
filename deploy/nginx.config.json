@@ -1,0 +1,9 @@
+{
+  "name": "platarium-gateway",
+  "mode": "hestia-proxy-template",
+  "configFile": ".env.nginx",
+  "configExample": ".env.nginx.example",
+  "templateName": "platarium-gateway",
+  "templateDir": "deploy/nginx/hestia",
+  "notes": "Public repo: host domain, CORS, ports, Hestia user live in .env.nginx (gitignored). See .env.nginx.example."
+}

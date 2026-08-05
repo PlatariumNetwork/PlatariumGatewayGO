@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# git pull → build once → copy binary into node0/ and node1/ → restart.
+# ensure nginx → git pull → build once → copy binary into node0/ and node1/ → restart.
 # Runtime data (.env, data/, log/) inside node folders is never overwritten.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+echo "== nginx (Hestia proxy for RPC domain) =="
+bash scripts/ensure-nginx.sh || true
 
 echo "== git pull =="
 git pull
