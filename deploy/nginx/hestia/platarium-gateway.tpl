@@ -1,0 +1,66 @@
+#=========================================================================#
+# Platarium Gateway — Hestia nginx proxy template (HTTP)
+# Placeholders filled by scripts/ensure-nginx.sh from env / .env.nginx
+#=========================================================================#
+
+server {
+    listen      %ip%:%proxy_port%;
+    server_name %domain_idn% %alias_idn%;
+    error_log   /var/log/%web_system%/domains/%domain%.error.log error;
+
+    include %home%/%user%/conf/web/%domain%/nginx.forcessl.conf*;
+
+    location ~ /\.(?!well-known\/|file) {
+        deny all;
+        return 404;
+    }
+
+    # BEGIN PLATARIUM_GATEWAY_PROXY
+    __CORS_BLOCK__
+
+    location /ws {
+        proxy_pass http://127.0.0.1:__WS_PORT__/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 7d;
+        proxy_send_timeout 7d;
+        proxy_buffering off;
+        proxy_cache off;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:__REST_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        proxy_buffering off;
+    }
+    # END PLATARIUM_GATEWAY_PROXY
+
+    location /error/ {
+        alias %home%/%user%/web/%domain%/document_errors/;
+    }
+
+    location @fallback {
+        proxy_pass http://127.0.0.1:__REST_PORT__;
+    }
+
+    location ~ /\.ht    {return 404;}
+    location ~ /\.svn/  {return 404;}
+    location ~ /\.git/  {return 404;}
+    location ~ /\.hg/   {return 404;}
+    location ~ /\.bzr/  {return 404;}
+
+    include %home%/%user%/conf/web/%domain%/nginx.conf_*;
+}
