@@ -670,6 +670,10 @@ func (s *Server) handleContactRespondWS(client *Client, data map[string]interfac
 	requestID := strField(data, "requestId")
 	outcome := strField(data, "outcome")
 	sig := strField(data, "signature")
+	if strings.TrimSpace(sig) == "" {
+		// Inbox is already bound to this socket; treat as ownership proof (same as REST "owned:").
+		sig = "owned:" + client.Address
+	}
 	enc := strField(data, "encryptedResponse")
 	req, err := ce.Respond(requestID, client.Address, outcome, sig)
 	if err != nil {

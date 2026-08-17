@@ -166,7 +166,14 @@ func (h *Handler) autoBlockCollectViaCycle() bool {
 		return h.autoBlockCollectL1()
 	}
 	if !res.OK || len(res.ValidHashes) == 0 {
-		logger.Warn("block_cycle no valid txs: %s", res.Error)
+		// Poison / permanently-invalid txs must leave the mempool, otherwise the
+		// 500ms auto-block worker re-verifies them forever (100% CPU).
+		if hash := extractFailedTxHash(res.Error); hash != "" {
+			h.blockchain.RemoveFromMempool([]string{hash})
+			logger.Warn("block_cycle no valid txs: dropped poison tx %s (%s)", hash, res.Error)
+		} else {
+			logger.Warn("block_cycle no valid txs: %s", res.Error)
+		}
 		return false
 	}
 	txs := h.blockchain.SelectTxsByHashes(res.ValidHashes)
