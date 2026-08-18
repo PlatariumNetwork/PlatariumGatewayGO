@@ -193,11 +193,6 @@ func main() {
 	router.HandleFunc("/api/faucet/cooldown", handler.FaucetCooldown).Methods("GET")
 	router.HandleFunc("/api/turn-ice", handler.WebRtcTurnIce).Methods("GET")
 	router.HandleFunc("/api/e2ee-pubkey", handler.GetE2eePubkey).Methods("GET")
-	router.HandleFunc("/api/public-channels", handler.RegisterPublicChannel).Methods("POST")
-	router.HandleFunc("/api/public-channels", handler.ListPublicChannels).Methods("GET")
-	router.HandleFunc("/api/public-channels/{address}", handler.GetPublicChannel).Methods("GET")
-	router.HandleFunc("/api/public-channels/{address}/posts", handler.AppendPublicChannelPost).Methods("POST")
-	router.HandleFunc("/api/public-channels/{address}/posts", handler.ListPublicChannelPosts).Methods("GET")
 
 	// First-contact messaging economy (protocol contacts on Gateway; PLP escrow on Core)
 	router.HandleFunc("/api/contact/pricing", handler.GetContactPricing).Methods("GET")
