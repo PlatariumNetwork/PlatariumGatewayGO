@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"platarium-gateway-go/internal/blockchain"
+	"platarium-gateway-go/internal/core"
 	"platarium-gateway-go/internal/handlers"
 	"platarium-gateway-go/internal/logger"
 	"platarium-gateway-go/internal/network"
@@ -34,6 +36,43 @@ var (
 	wsTLSKey  = flag.String("ws-tls-key", "", "TLS key for WebSocket (defaults to --tls-key)")
 	peerTLSCA = flag.String("peer-tls-ca", "", "CA bundle for wss peer connections (PLATARIUM_PEER_TLS_CA)")
 )
+
+
+// requireConsensusAuth gates L1/L2 confirm routes (H11).
+// Token: PLATARIUM_CONSENSUS_TOKEN, else PLATARIUM_CORE_RPC_TOKEN.
+// Header: Authorization: Bearer <token> or X-Platarium-Consensus-Token.
+// Empty token + PLATARIUM_CONSENSUS_INSECURE=1 allows (local only).
+func requireConsensusAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		expected := strings.TrimSpace(os.Getenv("PLATARIUM_CONSENSUS_TOKEN"))
+		if expected == "" {
+			expected = strings.TrimSpace(os.Getenv("PLATARIUM_CORE_RPC_TOKEN"))
+		}
+		insecure := strings.EqualFold(strings.TrimSpace(os.Getenv("PLATARIUM_CONSENSUS_INSECURE")), "1") ||
+			strings.EqualFold(strings.TrimSpace(os.Getenv("PLATARIUM_CONSENSUS_INSECURE")), "true")
+		if expected == "" {
+			if insecure || (*testnet && strings.TrimSpace(os.Getenv("PLATARIUM_CONSENSUS_INSECURE")) == "") {
+				// testnet default: allow without token for local auto-block; set CONSENSUS_TOKEN in shared nets
+				next(w, r)
+				return
+			}
+			http.Error(w, "consensus auth required: set PLATARIUM_CONSENSUS_TOKEN", http.StatusUnauthorized)
+			return
+		}
+		got := strings.TrimSpace(r.Header.Get("X-Platarium-Consensus-Token"))
+		if got == "" {
+			auth := r.Header.Get("Authorization")
+			if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+				got = strings.TrimSpace(auth[7:])
+			}
+		}
+		if got != expected {
+			http.Error(w, "unauthorized consensus route", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
 
 func getLocalIP() string {
 	addrs, err := net.InterfaceAddrs()
@@ -89,7 +128,12 @@ func main() {
 	log.Println("[Logging activated]")
 	if *testnet {
 		log.Println("[TESTNET] Test network mode: Core validation required for transactions")
+		_ = os.Setenv("PLATARIUM_CORE_TESTNET", "1")
+		// Local demo wallet/sign over RPC (H7) — never enable on mainnet by default.
+		_ = os.Setenv("PLATARIUM_CORE_ALLOW_REMOTE_SIGN", "1")
+		_ = os.Setenv("PLATARIUM_DAG_ALLOW_UNSIGNED", "1")
 	}
+	core.EnsureCoreRPCAuthEnv()
 	log.Printf("Starting Platarium Gateway on REST:%d, WS:%d", *portREST, *portWS)
 
 	// Initialize blockchain
@@ -177,10 +221,10 @@ func main() {
 	router.HandleFunc("/api/stats", handler.GetStats).Methods("GET")
 	router.HandleFunc("/api/accounts", handler.GetAccounts).Methods("GET")
 	router.HandleFunc("/api/demo-sendtx", handler.DemoSendTx).Methods("POST")
-	router.HandleFunc("/api/confirm-block", handler.ConfirmBlock).Methods("POST")
-	router.HandleFunc("/api/pending-block", handler.GetPendingBlock).Methods("GET")
-	router.HandleFunc("/api/l1-collect", handler.L1CollectBlock).Methods("POST")
-	router.HandleFunc("/api/l2-confirm", handler.L2ConfirmBlock).Methods("POST")
+		router.HandleFunc("/api/pending-block", handler.GetPendingBlock).Methods("GET")
+	router.HandleFunc("/api/l1-collect", requireConsensusAuth(handler.L1CollectBlock)).Methods("POST")
+	router.HandleFunc("/api/l2-confirm", requireConsensusAuth(handler.L2ConfirmBlock)).Methods("POST")
+	router.HandleFunc("/api/confirm-block", requireConsensusAuth(handler.ConfirmBlock)).Methods("POST")
 	router.HandleFunc("/api/reward-config", handler.GetRewardConfig).Methods("GET")
 	router.HandleFunc("/api/reward-credit-l1", handler.RewardCreditL1).Methods("POST")
 	router.HandleFunc("/api/fee-distribution", handler.GetFeeDistribution).Methods("GET")
@@ -193,6 +237,8 @@ func main() {
 	router.HandleFunc("/api/faucet/cooldown", handler.FaucetCooldown).Methods("GET")
 	router.HandleFunc("/api/turn-ice", handler.WebRtcTurnIce).Methods("GET")
 	router.HandleFunc("/api/e2ee-pubkey", handler.GetE2eePubkey).Methods("GET")
+	router.HandleFunc("/api/channel-identity", handler.GetChannelIdentity).Methods("GET")
+	router.HandleFunc("/api/channel-identity", handler.PutChannelIdentity).Methods("POST")
 
 	// First-contact messaging economy (protocol contacts on Gateway; PLP escrow on Core)
 	router.HandleFunc("/api/contact/pricing", handler.GetContactPricing).Methods("GET")
@@ -283,7 +329,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Platarium-Wallet")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)

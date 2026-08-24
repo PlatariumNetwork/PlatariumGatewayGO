@@ -92,7 +92,7 @@ build_cors_block() {
     # Single CORS value at the edge (hide upstream * from Go to avoid duplicate headers)
     add_header Access-Control-Allow-Origin "${primary}" always;
     add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
-    add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With" always;
+    add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, X-Platarium-Wallet" always;
     add_header Access-Control-Max-Age "86400" always;
     add_header Vary "Origin" always;
 

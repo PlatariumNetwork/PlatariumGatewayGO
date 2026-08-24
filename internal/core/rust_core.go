@@ -22,6 +22,7 @@ type RustCore struct {
 // When RPC mode and daemon is down, Gateway auto-starts `platarium-cli serve` unless
 // PLATARIUM_CORE_RPC_AUTOSTART=0.
 func NewRustCore() (*RustCore, error) {
+	EnsureCoreRPCAuthEnv()
 	rc := &RustCore{}
 
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("PLATARIUM_CORE_MODE")))
@@ -42,8 +43,11 @@ func NewRustCore() (*RustCore, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := client.Ping(); err != nil {
-			return nil, fmt.Errorf("core rpc ping %s: %w", addr, err)
+		if err := client.Handshake(); err != nil {
+			// Fallback for older Core builds that lack handshake.
+			if err2 := client.Ping(); err2 != nil {
+				return nil, fmt.Errorf("core rpc handshake/ping %s: %w / %v", addr, err, err2)
+			}
 		}
 		rc.rpcClient = client
 		rc.binaryPath, _ = resolveCLIPath()
@@ -115,29 +119,41 @@ func (rc *RustCore) Execute(args []string) (string, error) {
 // VerifySignature verifies a message signature using Rust Core.
 // Core expects either 64 bytes (128 hex chars) compact or DER. The sign-message CLI outputs
 // compact + "01" (130 hex chars); we pass only the first 128 hex chars so verification uses compact.
+// M4: security decision only from JSON `verified` — never substring matching.
 func (rc *RustCore) VerifySignature(message interface{}, signatureHex, pubKeyHex string) (bool, error) {
 	sigForCLI := normalizeSignatureHex(signatureHex)
 
-	// Serialize message to JSON
 	messageJSON, err := json.Marshal(message)
 	if err != nil {
 		return false, fmt.Errorf("failed to serialize message: %v", err)
 	}
 
-	args := []string{
-		"verify-signature",
-		"--message", string(messageJSON),
-		"--signature", sigForCLI,
-		"--pubkey", pubKeyHex,
+	var out string
+	if rc.rpcClient != nil {
+		out, err = rc.rpcClient.Call("verify_signature", map[string]interface{}{
+			"message":   string(messageJSON),
+			"signature": sigForCLI,
+			"pubkey":    pubKeyHex,
+		})
+	} else {
+		out, err = rc.Execute([]string{
+			"verify-signature",
+			"--message", string(messageJSON),
+			"--signature", sigForCLI,
+			"--pubkey", pubKeyHex,
+		})
 	}
-	
-	output, err := rc.Execute(args)
 	if err != nil {
 		return false, err
 	}
-	
-	// Check if output contains "Verified: true"
-	return strings.Contains(output, "Verified: true"), nil
+
+	var parsed struct {
+		Verified bool `json:"verified"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &parsed); err != nil {
+		return false, fmt.Errorf("verify_signature: expected JSON {\"verified\":bool}: %w", err)
+	}
+	return parsed.Verified, nil
 }
 
 // GenerateMnemonic creates a new mnemonic and alphanumeric via Core. Returns mnemonic, alphanumeric, error.
@@ -161,36 +177,40 @@ func (rc *RustCore) GenerateMnemonic() (mnemonic, alphanumeric string, err error
 	return mnemonic, alphanumeric, nil
 }
 
-// GenerateKeys generates keys from mnemonic
+// GenerateKeys generates keys from mnemonic.
+// M4: parse only JSON fields — never line-prefix heuristics for key material.
 func (rc *RustCore) GenerateKeys(mnemonic, alphanumeric string, seedIndex uint32) (map[string]string, error) {
-	args := []string{
-		"generate-keys",
-		"--mnemonic", mnemonic,
-		"--alphanumeric", alphanumeric,
-		"--seed-index", fmt.Sprintf("%d", seedIndex),
+	var out string
+	var err error
+	if rc.rpcClient != nil {
+		params := map[string]interface{}{
+			"mnemonic":    mnemonic,
+			"seed_index":  seedIndex,
+		}
+		if alphanumeric != "" {
+			params["alphanumeric"] = alphanumeric
+		}
+		out, err = rc.rpcClient.Call("generate_keys", params)
+	} else {
+		out, err = rc.Execute([]string{
+			"generate-keys",
+			"--mnemonic", mnemonic,
+			"--alphanumeric", alphanumeric,
+			"--seed-index", fmt.Sprintf("%d", seedIndex),
+		})
 	}
-	
-	output, err := rc.Execute(args)
 	if err != nil {
 		return nil, err
 	}
-	
-	// Parse output
-	result := make(map[string]string)
-	lines := strings.Split(output, "\n")
-	
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Public Key: ") {
-			result["publicKey"] = strings.TrimPrefix(line, "Public Key: ")
-		} else if strings.HasPrefix(line, "Private Key: ") {
-			result["privateKey"] = strings.TrimPrefix(line, "Private Key: ")
-		} else if strings.HasPrefix(line, "Signature Key: ") {
-			result["signatureKey"] = strings.TrimPrefix(line, "Signature Key: ")
-		}
+
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &parsed); err != nil {
+		return nil, fmt.Errorf("generate_keys: expected JSON object: %w", err)
 	}
-	
-	return result, nil
+	if parsed["publicKey"] == "" || parsed["privateKey"] == "" {
+		return nil, fmt.Errorf("generate_keys: missing publicKey/privateKey in JSON")
+	}
+	return parsed, nil
 }
 
 // SelectionPercentFromLoad returns the validator selection percent (10–30) from load percentage (0–100).

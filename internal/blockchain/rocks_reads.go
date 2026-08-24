@@ -18,7 +18,9 @@ func (bc *Blockchain) RocksEnabled() bool {
 	return bc.rocksClient() != nil && bc.rocksClient().Enabled()
 }
 
-// SetRocksStore attaches the Core RocksDB client for canonical reads/commits.
+// SetRocksStore attaches the Core RocksDB client for canonical reads/commits (M6).
+// When set, Go chain.json / in-memory index are explorer cache only; confirmed writes
+// must go through L2/legacy confirm + rocks commit (fail-closed).
 func (bc *Blockchain) SetRocksStore(rocks *core.RocksStoreClient) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()

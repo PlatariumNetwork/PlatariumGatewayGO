@@ -2,6 +2,7 @@ package core
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -9,6 +10,17 @@ import (
 // Linux ARG_MAX is typically ~128KiB–2MiB for the whole argv; mempool snapshots
 // alone can exceed that during high-throughput admission.
 const cliJSONSpillBytes = 12 * 1024
+
+func spillDir() string {
+	if d := strings.TrimSpace(os.Getenv("PLATARIUM_CLI_SPILL_DIR")); d != "" {
+		_ = os.MkdirAll(d, 0o700)
+		return d
+	}
+	d := filepath.Join(os.TempDir(), "platarium-cli-spill")
+	_ = os.MkdirAll(d, 0o700)
+	_ = os.Setenv("PLATARIUM_CLI_SPILL_DIR", d)
+	return d
+}
 
 // Flags whose values are JSON blobs and may grow with mempool / block size.
 var spillJSONFlags = map[string]bool{
@@ -50,7 +62,7 @@ func spillLargeCLIArgs(args []string) (out []string, cleanup func(), err error) 
 			out = append(out, val)
 			continue
 		}
-		f, createErr := os.CreateTemp("", "platarium-cli-arg-*.json")
+	f, createErr := os.CreateTemp(spillDir(), "platarium-cli-arg-*.json")
 		if createErr != nil {
 			cleanup()
 			return nil, func() {}, createErr

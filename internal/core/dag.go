@@ -82,7 +82,8 @@ type DagIngestResult struct {
 	Error          string   `json:"error,omitempty"`
 }
 
-// DagReset clears the Core process-global DAG store (test helper).
+// DagReset clears the Core process-global DAG store (test/recovery helper).
+// Requires Core env PLATARIUM_DAG_ALLOW_RESET=1 (M1; blocked in prod by default).
 func (rc *RustCore) DagReset() error {
 	if rc.rpcClient == nil {
 		return fmt.Errorf("dag_reset requires PLATARIUM_CORE_MODE=rpc")

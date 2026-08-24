@@ -823,6 +823,12 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 	bc.mu.Lock()
 	pendingCopy := make([]*Transaction, len(bc.pendingBlock))
 	copy(pendingCopy, bc.pendingBlock)
+	pendingFinger := make([]string, 0, len(pendingCopy))
+	for _, tx := range pendingCopy {
+		if tx != nil {
+			pendingFinger = append(pendingFinger, tx.Hash)
+		}
+	}
 	bc.mu.Unlock()
 
 	if err := bc.applyConfirmedTransactions(pendingCopy); err != nil {
@@ -831,6 +837,19 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
+	// H9: abort if pending set changed while we applied the copy.
+	if len(bc.pendingBlock) != len(pendingCopy) {
+		return nil, BlockRecord{}, fmt.Errorf("L2ConfirmBlock TOCTOU: pending changed during apply")
+	}
+	for i, tx := range bc.pendingBlock {
+		h := ""
+		if tx != nil {
+			h = tx.Hash
+		}
+		if i >= len(pendingFinger) || h != pendingFinger[i] {
+			return nil, BlockRecord{}, fmt.Errorf("L2ConfirmBlock TOCTOU: pending hash mismatch at %d", i)
+		}
+	}
 	block = BlockRecord{
 		BlockNumber: bc.blockCounter,
 		Timestamp:   0,
@@ -839,8 +858,8 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 		TotalFees:   0,
 	}
 	bc.blockCounter++
-	moved = make([]*Transaction, 0, len(bc.pendingBlock))
-	for _, tx := range bc.pendingBlock {
+	moved = make([]*Transaction, 0, len(pendingCopy))
+	for _, tx := range pendingCopy {
 		fee := parseFee(tx.Fee)
 		if fee == 0 && tx.FeeUplp > 0 {
 			fee = int64(tx.FeeUplp)

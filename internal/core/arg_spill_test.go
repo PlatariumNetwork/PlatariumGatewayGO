@@ -2,6 +2,7 @@ package core
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -39,5 +40,23 @@ func TestSpillLargeCLIArgsWritesAtFile(t *testing.T) {
 	}
 	if string(data) != big {
 		t.Fatalf("file content mismatch len=%d", len(data))
+	}
+}
+
+func TestSpillUsesAllowlistedDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PLATARIUM_CLI_SPILL_DIR", dir)
+	big := strings.Repeat("x", cliJSONSpillBytes+10)
+	out, cleanup, err := spillLargeCLIArgs([]string{"state-apply-tx", "--tx", big})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if len(out) < 3 || !strings.HasPrefix(out[2], "@") {
+		t.Fatalf("expected @spill path, got %#v", out)
+	}
+	path := strings.TrimPrefix(out[2], "@")
+	if !strings.HasPrefix(path, dir+string(os.PathSeparator)) && filepath.Dir(path) != dir {
+		t.Fatalf("spill path %q not under %q", path, dir)
 	}
 }

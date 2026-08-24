@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -14,12 +15,13 @@ import (
 // RPCClient talks to platarium-cli serve over newline-delimited JSON-RPC 2.0.
 // Keeps a persistent connection (TCP or Unix) and reconnects on failure.
 type RPCClient struct {
-	addr    string // dial target: host:port or unix path
-	network string // "tcp" or "unix"
-	mu      sync.Mutex
-	id      int64
-	conn    net.Conn
-	reader  *bufio.Reader
+	addr      string // dial target: host:port or unix path
+	network   string // "tcp" or "unix"
+	authToken string
+	mu        sync.Mutex
+	id        int64
+	conn      net.Conn
+	reader    *bufio.Reader
 }
 
 // ParseRPCAddr returns network ("tcp"|"unix") and dial address.
@@ -44,7 +46,11 @@ func ParseRPCAddr(addr string) (network, dialAddr string) {
 // NewRPCClient connects to Core RPC daemon at addr (TCP host:port or unix:/path).
 func NewRPCClient(addr string) (*RPCClient, error) {
 	network, dialAddr := ParseRPCAddr(addr)
-	c := &RPCClient{addr: dialAddr, network: network}
+	c := &RPCClient{
+		addr:      dialAddr,
+		network:   network,
+		authToken: strings.TrimSpace(os.Getenv("PLATARIUM_CORE_RPC_TOKEN")),
+	}
 	if err := c.connectLocked(); err != nil {
 		// Allow construction even if daemon is not up yet (auto-start will retry).
 		// First Call will reconnect.
@@ -75,10 +81,42 @@ func (c *RPCClient) ensureConnLocked() error {
 	return c.connectLocked()
 }
 
-// Ping checks the daemon is reachable.
+// Ping checks the daemon is reachable (liveness only).
 func (c *RPCClient) Ping() error {
 	_, err := c.Call("ping", map[string]interface{}{})
 	return err
+}
+
+// Handshake verifies protocol version (H11) — preferred over bare Ping for trust.
+func (c *RPCClient) Handshake() error {
+	out, err := c.Call("handshake", map[string]interface{}{})
+	if err != nil {
+		return err
+	}
+	var parsed struct {
+		OK       bool   `json:"ok"`
+		Protocol int    `json:"protocol"`
+		Version  string `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		return fmt.Errorf("handshake parse: %w", err)
+	}
+	if !parsed.OK || parsed.Protocol < 2 {
+		return fmt.Errorf("handshake rejected: ok=%v protocol=%d version=%s", parsed.OK, parsed.Protocol, parsed.Version)
+	}
+	return nil
+}
+
+func isMutatingRPCMethod(method string) bool {
+	switch method {
+	case "state_apply_tx", "state_credit", "kernel_apply_batch", "kernel_commit_diff",
+		"rocks_commit_block", "rocks_bootstrap_snapshot", "migrate_json_to_rocks",
+		"dag_insert", "dag_try_commit", "dag_try_commit_batches", "dag_reset",
+		"dag_ingest", "mempool_admit", "block_cycle":
+		return true
+	default:
+		return false
+	}
 }
 
 // Close releases the persistent connection.
@@ -130,18 +168,25 @@ func (c *RPCClient) Call(method string, params map[string]interface{}) (string, 
 		"method":  method,
 		"params":  params,
 	}
+	if c.authToken != "" {
+		req["auth_token"] = c.authToken
+	}
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
 		return "", err
 	}
 
-	out, err := c.roundTripLocked(reqBytes)
+	out, wrote, err := c.roundTripLocked(reqBytes, reqID)
 	if err != nil {
-		// One reconnect retry.
+		// H8: never retry mutating calls after the request bytes were written —
+		// the Core may have applied state before the read timed out.
+		if wrote && isMutatingRPCMethod(method) {
+			return "", fmt.Errorf("mutating RPC %s: write completed but response failed (refusing retry to avoid double-apply): %w", method, err)
+		}
 		if reconnErr := c.connectLocked(); reconnErr != nil {
 			return "", err
 		}
-		out, err = c.roundTripLocked(reqBytes)
+		out, _, err = c.roundTripLocked(reqBytes, reqID)
 		if err != nil {
 			return "", err
 		}
@@ -149,24 +194,25 @@ func (c *RPCClient) Call(method string, params map[string]interface{}) (string, 
 	return out, nil
 }
 
-func (c *RPCClient) roundTripLocked(reqBytes []byte) (string, error) {
+func (c *RPCClient) roundTripLocked(reqBytes []byte, reqID int64) (result string, wrote bool, err error) {
 	if err := c.ensureConnLocked(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	_ = c.conn.SetDeadline(time.Now().Add(60 * time.Second))
 	if _, err := fmt.Fprintf(c.conn, "%s\n", reqBytes); err != nil {
 		_ = c.conn.Close()
 		c.conn = nil
 		c.reader = nil
-		return "", err
+		return "", false, err
 	}
+	wrote = true
 
 	line, err := c.reader.ReadString('\n')
 	if err != nil {
 		_ = c.conn.Close()
 		c.conn = nil
 		c.reader = nil
-		return "", fmt.Errorf("core rpc read: %w", err)
+		return "", wrote, fmt.Errorf("core rpc read: %w", err)
 	}
 	line = strings.TrimRight(line, "\r\n")
 
@@ -179,20 +225,28 @@ func (c *RPCClient) roundTripLocked(reqBytes []byte) (string, error) {
 		} `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(line), &resp); err != nil {
-		return "", fmt.Errorf("core rpc parse response: %w", err)
+		return "", wrote, fmt.Errorf("core rpc parse response: %w", err)
+	}
+	// H8: response id must match request id.
+	var gotID int64
+	if len(resp.ID) > 0 {
+		_ = json.Unmarshal(resp.ID, &gotID)
+	}
+	if gotID != reqID {
+		return "", wrote, fmt.Errorf("core rpc id mismatch: want %d got %s", reqID, string(resp.ID))
 	}
 	if resp.Error != nil {
-		return "", fmt.Errorf("core rpc error %d: %s", resp.Error.Code, resp.Error.Message)
+		return "", wrote, fmt.Errorf("core rpc error %d: %s", resp.Error.Code, resp.Error.Message)
 	}
 	if len(resp.Result) == 0 {
-		return "", nil
+		return "", wrote, nil
 	}
 
 	var asString string
 	if err := json.Unmarshal(resp.Result, &asString); err == nil {
-		return asString, nil
+		return asString, wrote, nil
 	}
-	return string(resp.Result), nil
+	return string(resp.Result), wrote, nil
 }
 
 // ExecuteRPC maps platarium-cli argv to JSON-RPC and normalizes output for CLI-compatible callers.
@@ -221,23 +275,10 @@ func normalizeRPCOutput(method, out string) (string, error) {
 		}
 		return fmt.Sprintf("Mnemonic: %s\nAlphanumeric: %s", parsed.Mnemonic, parsed.Alphanumeric), nil
 	case "generate_keys":
-		var parsed map[string]string
-		if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-			return out, nil
-		}
-		return fmt.Sprintf("Public Key: %s\nPrivate Key: %s\nSignature Key: %s",
-			parsed["publicKey"], parsed["privateKey"], parsed["signatureKey"]), nil
+		// M4: keep JSON for security-sensitive parsers (do not rewrite to CLI prose).
+		return out, nil
 	case "verify_signature":
-		var parsed struct {
-			Verified bool `json:"verified"`
-		}
-		if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-			return out, nil
-		}
-		if parsed.Verified {
-			return "Verified: true\nSignature is valid.", nil
-		}
-		return "Verified: false\nSignature is invalid.", nil
+		return out, nil
 	case "sign_message":
 		var parsed struct {
 			Hash string `json:"hash"`
@@ -260,5 +301,9 @@ func DefaultCoreRPCAddr() string {
 	if v := strings.TrimSpace(os.Getenv("PLATARIUM_CORE_RPC_SOCK")); v != "" {
 		return "unix:" + v
 	}
-	return "unix:/tmp/platarium-core.sock"
+	// Avoid world-writable /tmp — use process-private runtime dir when available.
+	if runtimeDir := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")); runtimeDir != "" {
+		return "unix:" + filepath.Join(runtimeDir, "platarium-core.sock")
+	}
+	return "unix:" + filepath.Join("data", "platarium-core.sock")
 }

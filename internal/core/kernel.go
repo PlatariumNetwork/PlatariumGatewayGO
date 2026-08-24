@@ -22,7 +22,7 @@ type KernelExecuteResult struct {
 	Waves json.RawMessage `json:"waves"`
 }
 
-// KernelCommitResult is the parsed kernel_commit_diff response.
+// KernelCommitResult is the parsed kernel_commit_diff / kernel_apply_batch response.
 type KernelCommitResult struct {
 	OK            bool   `json:"ok"`
 	PostStateRoot string `json:"post_state_root"`
@@ -76,7 +76,8 @@ func (rc *RustCore) KernelExecuteBatch(p KernelExecuteBatchParams) (*KernelExecu
 	return &res, nil
 }
 
-// KernelCommitDiff applies a StateDiff via StorageEngine (state file).
+// KernelCommitDiff is disabled on Core by default (C3). Prefer KernelApplyBatch.
+// Only works when Core has PLATARIUM_CORE_ALLOW_EXTERNAL_COMMIT=1.
 func (rc *RustCore) KernelCommitDiff(stateFile string, diff json.RawMessage) (*KernelCommitResult, error) {
 	if rc.rpcClient == nil {
 		return nil, fmt.Errorf("kernel_commit_diff requires PLATARIUM_CORE_MODE=rpc")
@@ -100,24 +101,38 @@ func (rc *RustCore) KernelCommitDiff(stateFile string, diff json.RawMessage) (*K
 	return &res, nil
 }
 
-// KernelApplyBatch execute+commit for a batch of Core TX JSON strings (RPC only).
+// KernelApplyBatch atomically execute+commit via Core kernel_apply_batch (C3).
 func (rc *RustCore) KernelApplyBatch(stateFile, batchID string, height uint64, coreTxJSONs []string, parallel bool) (*KernelCommitResult, error) {
-	raws := make([]json.RawMessage, 0, len(coreTxJSONs))
-	for _, s := range coreTxJSONs {
-		raws = append(raws, json.RawMessage(s))
+	if rc.rpcClient == nil {
+		return nil, fmt.Errorf("kernel_apply_batch requires PLATARIUM_CORE_MODE=rpc")
 	}
-	execRes, err := rc.KernelExecuteBatch(KernelExecuteBatchParams{
-		StateFile:    stateFile,
-		BatchID:      batchID,
-		Height:       height,
-		Transactions: raws,
-		Parallel:     parallel,
-	})
+	if batchID == "" {
+		batchID = "batch"
+	}
+	txs := make([]interface{}, 0, len(coreTxJSONs))
+	for _, s := range coreTxJSONs {
+		var obj interface{}
+		if err := json.Unmarshal([]byte(s), &obj); err != nil {
+			return nil, fmt.Errorf("kernel tx json: %w", err)
+		}
+		txs = append(txs, obj)
+	}
+	params := map[string]interface{}{
+		"state_file": stateFile,
+		"parallel":   parallel,
+		"batch": map[string]interface{}{
+			"batch_id":     batchID,
+			"height":       height,
+			"transactions": txs,
+		},
+	}
+	out, err := rc.rpcClient.Call("kernel_apply_batch", params)
 	if err != nil {
 		return nil, err
 	}
-	if !execRes.OK {
-		return nil, fmt.Errorf("kernel_execute_batch not ok")
+	var res KernelCommitResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		return nil, fmt.Errorf("parse kernel_apply_batch: %w", err)
 	}
-	return rc.KernelCommitDiff(stateFile, execRes.Diff)
+	return &res, nil
 }

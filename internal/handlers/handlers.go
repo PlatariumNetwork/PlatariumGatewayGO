@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"platarium-gateway-go/internal/blockchain"
+	"platarium-gateway-go/internal/channelidentity"
 	"platarium-gateway-go/internal/contacteconomy"
 	"platarium-gateway-go/internal/core"
 	"platarium-gateway-go/internal/faucet"
@@ -87,6 +88,7 @@ type Handler struct {
 
 	contactEconomy     *contacteconomy.Store
 	contactRate        *ratelimit.Limiter
+	channelIdentity    *channelidentity.Store
 
 	autoBlockMu sync.Mutex
 
@@ -194,6 +196,7 @@ func NewHandler(bc *blockchain.Blockchain, nm *nodes.NodesManager, ws *websocket
 	}
 	h.faucetAmountPLP = faucetAmountFromEnv()
 	ensureContactEconomy(h)
+	ensureChannelIdentity(h)
 	h.contactRate = ratelimit.New(40, time.Minute)
 	h.RegisterVoteCallbacks()
 	h.RegisterSyncCallbacks()
@@ -3069,9 +3072,22 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		block.PreviousHash = header.PreviousHash
 		block.ProducerNodeID = myId
 		if err := h.commitBlockToRocks(block, moved, header.StateRoot); err != nil {
-			logger.Error("RocksDB commit after L2 confirm FAILED (explorer may lose blocks on restart until fixed): %v", err)
+			// H10: fail-closed — do not report L2 success if canonical Rocks commit failed.
+			logger.Error("RocksDB commit after L2 confirm FAILED: %v", err)
+			jsonResponse(w, http.StatusInternalServerError, map[string]string{
+				"error": "rocks commit failed after L2 confirm: " + err.Error(),
+			})
+			return
 		}
 	} else {
+		// M6: with Rocks authoritative, L2 without header/commit leaves dual ledgers divergent.
+		if h.blockchain.RocksEnabled() {
+			logger.Error("assemble-block failed after L2 with Rocks enabled: %v", hdrErr)
+			jsonResponse(w, http.StatusInternalServerError, map[string]string{
+				"error": "assemble-block required when Rocks is authoritative: " + hdrErr.Error(),
+			})
+			return
+		}
 		logger.Warn("assemble-block failed after L2 confirm: %v", hdrErr)
 		// Still persist explorer cache without hashes so txs/blocks survive restart.
 		if err := h.blockchain.PersistChainSnapshot(); err != nil {
@@ -3216,8 +3232,19 @@ func (h *Handler) ConfirmBlock(w http.ResponseWriter, r *http.Request) {
 		block.PreviousHash = header.PreviousHash
 		if err := h.commitBlockToRocks(block, moved, header.StateRoot); err != nil {
 			logger.Error("RocksDB commit after legacy confirm FAILED: %v", err)
+			jsonResponse(w, http.StatusInternalServerError, map[string]string{
+				"error": "rocks commit failed after confirm: " + err.Error(),
+			})
+			return
 		}
 	} else {
+		if h.blockchain.RocksEnabled() {
+			logger.Error("assemble-block failed after legacy confirm with Rocks enabled: %v", hdrErr)
+			jsonResponse(w, http.StatusInternalServerError, map[string]string{
+				"error": "assemble-block required when Rocks is authoritative: " + hdrErr.Error(),
+			})
+			return
+		}
 		logger.Warn("assemble-block failed after legacy confirm: %v", hdrErr)
 		_ = h.blockchain.PersistChainSnapshot()
 	}
