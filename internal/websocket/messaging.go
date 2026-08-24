@@ -337,31 +337,48 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 	}
 
 	to := normalizePlatariumAddress(toRaw)
+	purpose, _ := data["purpose"].(string)
+	purpose = strings.TrimSpace(purpose)
+	sendID, _ := data["sendId"].(string)
+	sendID = strings.TrimSpace(sendID)
+	groupProtocol := purpose == wsPurposeGroupProtocol
+
+	writeErr := func(errMsg string) {
+		payload := map[string]interface{}{
+			"error": errMsg,
+			"to":    to,
+		}
+		if sendID != "" {
+			payload["sendId"] = sendID
+		}
+		sender.Conn.WriteJSON(map[string]interface{}{
+			"type": "messageError",
+			"data": payload,
+		})
+	}
 
 	if from == "" {
 		log.Printf("[MESSAGE] Sender %s not registered", sender.ID)
-		sender.Conn.WriteJSON(map[string]interface{}{
-			"type": "messageError",
-			"data": map[string]interface{}{
-				"error": "You must register your address first",
-			},
-		})
+		writeErr("You must register your address first")
+		return
+	}
+
+	if groupProtocol && !s.allowGroupProtocolSend(from, time.Now().Unix()) {
+		log.Printf("[MESSAGE] Group protocol rate-limited: %s -> %s", from, to)
+		writeErr("group_protocol_rate_limited")
 		return
 	}
 
 	s.mu.RLock()
 	ce := s.contactEconomy
 	s.mu.RUnlock()
-	if ce != nil && !ce.CanSendFreeDM(from, to) {
+	if ce != nil && !groupProtocol && !ce.CanSendFreeDM(from, to) {
 		log.Printf("[MESSAGE] First-contact gate: %s -> %s requires contact request + PLP lock", from, to)
-		sender.Conn.WriteJSON(map[string]interface{}{
-			"type": "messageError",
-			"data": map[string]interface{}{
-				"error": "protocol_contact_required",
-				"to":    to,
-			},
-		})
+		writeErr("protocol_contact_required")
 		return
+	}
+	if groupProtocol {
+		log.Printf("[MESSAGE] Group protocol %s -> %s (first-contact bypass)", from, to)
 	}
 
 	recipients := s.snapshotClientsForAddr(to)
@@ -373,16 +390,20 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 		s.mu.RLock()
 		ownDevices := s.deviceEntriesForAddrLocked(from)
 		s.mu.RUnlock()
+		payload := map[string]interface{}{
+			"to":               to,
+			"timestamp":        time.Now().Unix(),
+			"delivered":        delivered,
+			"deviceCount":      deviceCount,
+			"devices":          devices,
+			"ownDevicesOnline": ownDevices,
+		}
+		if sendID != "" {
+			payload["sendId"] = sendID
+		}
 		sender.Conn.WriteJSON(map[string]interface{}{
 			"type": "messageSent",
-			"data": map[string]interface{}{
-				"to":               to,
-				"timestamp":        time.Now().Unix(),
-				"delivered":        delivered,
-				"deviceCount":      deviceCount,
-				"devices":          devices,
-				"ownDevicesOnline": ownDevices,
-			},
+			"data": payload,
 		})
 	}
 
@@ -464,6 +485,36 @@ func (s *Server) handleDirectMessage(sender *Client, data map[string]interface{}
 			c.mu.Unlock()
 		}
 	}
+}
+
+const (
+	wsPurposeGroupProtocol      = "group_protocol"
+	groupProtocolRateLimit      = 120
+	groupProtocolRateWindowSecs = int64(60)
+)
+
+// allowGroupProtocolSend rate-limits first-contact bypass so it cannot be used as a spam pipe.
+func (s *Server) allowGroupProtocolSend(from string, now int64) bool {
+	key := normalizePlatariumAddress(from)
+	cutoff := now - groupProtocolRateWindowSecs
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.groupProtocolHits == nil {
+		s.groupProtocolHits = make(map[string][]int64)
+	}
+	prev := s.groupProtocolHits[key]
+	kept := prev[:0]
+	for _, ts := range prev {
+		if ts >= cutoff {
+			kept = append(kept, ts)
+		}
+	}
+	if len(kept) >= groupProtocolRateLimit {
+		s.groupProtocolHits[key] = kept
+		return false
+	}
+	s.groupProtocolHits[key] = append(kept, now)
+	return true
 }
 
 func (s *Server) handleE2eePubKeyRequest(client *Client, data map[string]interface{}) {

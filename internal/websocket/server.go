@@ -47,6 +47,8 @@ type Server struct {
 	server         *http.Server
 	messageHandler func(map[string]interface{}) // Handler for incoming peer messages
 	contactEconomy *contacteconomy.Store
+	// Sliding window of group_protocol sends (sender → unix timestamps).
+	groupProtocolHits map[string][]int64
 }
 
 // Client represents a WebSocket client connection
@@ -78,8 +80,9 @@ func NewServer(port int, bc *blockchain.Blockchain, nm *nodes.NodesManager) *Ser
 		nodesManager: nm,
 		clients:         make(map[string]*Client),
 		clientsByAddr:   make(map[string]map[string]*Client),
-		offlineMessages: make(map[string][]OfflineMessage),
-		e2eePubKeys:     make(map[string]string),
+		offlineMessages:   make(map[string][]OfflineMessage),
+		e2eePubKeys:       make(map[string]string),
+		groupProtocolHits: make(map[string][]int64),
 	}
 
 	// Set local sockets getter
