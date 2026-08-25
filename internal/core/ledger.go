@@ -10,12 +10,14 @@ import (
 
 // AccountQuery is the parsed state-query response from platarium-cli.
 type AccountQuery struct {
-	Address           string `json:"address"`
-	Asset             string `json:"asset"`
-	Balance           string `json:"balance"`
-	UplpBalance       string `json:"uplp_balance"`
-	FeeSpendableUplp  string `json:"fee_spendable_uplp"`
-	Nonce             uint64 `json:"nonce"`
+	Address          string            `json:"address"`
+	Asset            string            `json:"asset"`
+	Balance          string            `json:"balance"`
+	UplpBalance      string            `json:"uplp_balance"`
+	FeeSpendableUplp string            `json:"fee_spendable_uplp"`
+	Nonce            uint64            `json:"nonce"`
+	Tokens           map[string]string `json:"tokens,omitempty"`
+	Xp               string            `json:"xp,omitempty"`
 }
 
 // ApplyTxResult is the parsed state-apply-tx response.
@@ -121,6 +123,18 @@ func (ls *LedgerService) Credit(address string, plp, uplp uint64) error {
 		return fmt.Errorf("state credit only allowed in testnet mode")
 	}
 	_, err := ls.rustCore.StateCredit(ls.stateFile, address, plp, uplp, true)
+	return err
+}
+
+// CreditToken mints accumulate-only Token:XP (testnet). Cannot transfer this asset.
+func (ls *LedgerService) CreditToken(address, asset string, amount uint64) error {
+	if !ls.testnet {
+		return fmt.Errorf("token credit only allowed in testnet mode")
+	}
+	if amount == 0 {
+		return fmt.Errorf("token credit amount must be > 0")
+	}
+	_, err := ls.rustCore.StateCreditToken(ls.stateFile, address, asset, amount, true)
 	return err
 }
 

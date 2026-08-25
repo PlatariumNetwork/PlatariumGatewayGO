@@ -362,7 +362,7 @@ Complete overview of all connected WebSocket clients across the entire network.
 
 ### `GET /pg-bal/{address}`
 
-Get balance, nonce, and μPLP balance from Core state file. Returns **503** if Core ledger is unavailable.
+Get balance, nonce, μPLP, and token balances (including accumulate-only `Token:XP` as `xp`) from Core state. Returns **503** if Core ledger is unavailable. `Token:XP` cannot be sent via `/pg-sendtx`.
 
 ### `GET /pg-tx/{hash}`
 

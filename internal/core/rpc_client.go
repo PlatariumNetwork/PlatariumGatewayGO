@@ -109,7 +109,7 @@ func (c *RPCClient) Handshake() error {
 
 func isMutatingRPCMethod(method string) bool {
 	switch method {
-	case "state_apply_tx", "state_credit", "kernel_apply_batch", "kernel_commit_diff",
+	case "state_apply_tx", "state_credit", "state_credit_token", "kernel_apply_batch", "kernel_commit_diff",
 		"rocks_commit_block", "rocks_bootstrap_snapshot", "migrate_json_to_rocks",
 		"dag_insert", "dag_try_commit", "dag_try_commit_batches", "dag_reset",
 		"dag_ingest", "mempool_admit", "block_cycle":

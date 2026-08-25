@@ -381,6 +381,24 @@ func (rc *RustCore) StateCredit(stateFile, address string, plp, uplp uint64, tes
 	return rc.Execute(args)
 }
 
+// StateCreditToken credits accumulate-only Token:XP (testnet only).
+func (rc *RustCore) StateCreditToken(stateFile, address, asset string, amount uint64, testnet bool) (string, error) {
+	if strings.TrimSpace(asset) == "" {
+		asset = "Token:XP"
+	}
+	args := []string{
+		"state-credit-token",
+		"--state-file", stateFile,
+		"--address", address,
+		"--asset", asset,
+		"--amount", fmt.Sprintf("%d", amount),
+	}
+	if testnet {
+		args = append(args, "--testnet")
+	}
+	return rc.Execute(args)
+}
+
 // StateRoot returns the deterministic state root from Core state file.
 func (rc *RustCore) StateRoot(stateFile string) (string, error) {
 	return rc.Execute([]string{"state-root", "--state-file", stateFile})

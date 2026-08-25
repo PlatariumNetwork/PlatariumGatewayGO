@@ -272,6 +272,9 @@ func (h *Handler) validateTxForMempool(tx *blockchain.Transaction) error {
 	if tx.From == blockchain.FaucetAddress || tx.Type == "faucet" {
 		return fmt.Errorf("faucet transactions are not admitted to mempool")
 	}
+	if blockchain.IsNonTransferableAsset(tx.Asset) {
+		return fmt.Errorf("Token:XP is accumulate-only and cannot be transferred")
+	}
 	if h.rustCore == nil {
 		return fmt.Errorf("rust core unavailable")
 	}
@@ -792,6 +795,14 @@ func (h *Handler) applyOperatorBlockReward(blockNumber uint64, loadPct int, l1Sh
 		blockNumber, loadPct, feeTotal, l1, l2,
 	)
 
+	if ledger := h.blockchain.Ledger(); ledger != nil && xp > 0 {
+		if err := ledger.CreditToken(h.operatorWallet, blockchain.TokenXP, uint64(xp)); err != nil {
+			logger.Warn("operator Token:XP credit failed wallet=%s xp=%d: %v", h.operatorWallet, xp, err)
+		} else {
+			logger.Info("operator Token:XP credited wallet=%s xp=%d block=%d", h.operatorWallet, xp, blockNumber)
+		}
+	}
+
 	if h.contributorsAPIURL == "" {
 		logger.Info("operator XP computed xp=%d ref=%s (set PLATARIUM_CONTRIBUTORS_API_URL to report to Scan leaderboard)", xp, ref)
 		return
@@ -1165,12 +1176,23 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	tokens := account.Tokens
+	if tokens == nil {
+		tokens = map[string]string{}
+	}
+	xp := account.Xp
+	if xp == "" {
+		xp = blockchain.TokenXPFromMap(tokens)
+	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"address":            address,
 		"balance":            account.Balance,
 		"nonce":              account.Nonce,
 		"uplp_balance":       account.UplpBalance,
 		"fee_spendable_uplp": account.FeeSpendableUplp,
+		"asset":              account.Asset,
+		"tokens":             tokens,
+		"xp":                 xp,
 	})
 }
 
@@ -1757,6 +1779,12 @@ func (h *Handler) submitCoreSignedTx(w http.ResponseWriter, txData map[string]in
 	}
 	if tx.Asset == "" {
 		tx.Asset = "PLP"
+	}
+	if blockchain.IsNonTransferableAsset(tx.Asset) {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{
+			"error": "Token:XP is accumulate-only and cannot be transferred",
+		})
+		return
 	}
 	if tx.Value == "" && tx.AmountUplp > 0 {
 		tx.Value = strconv.FormatUint(tx.AmountUplp, 10)
