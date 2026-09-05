@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -56,9 +55,9 @@ type NodesManager struct {
 
 	// L1/L2 vote callbacks (called before re-broadcast so handler can collect votes / respond with vote)
 	l1ProposalCB       func(blockId, proposerNodeId string, txCount int, txHashes []string)
-	l1VoteCB           func(blockId, nodeId string, yes bool)
+	l1VoteCB           func(blockId, nodeId string, yes bool, pubKey, signature string)
 	l2ProposalCB       func(blockId, proposerNodeId string, txHashes []string)
-	l2VoteCB           func(blockId, nodeId string, yes bool)
+	l2VoteCB           func(blockId, nodeId string, yes bool, pubKey, signature string)
 	l1BlockCollectedCB  func(l1BeneficiaryNodeId string) // who gets L1 reward when L2 confirms
 	pendingBlockSyncCB  func(pendingBlock []map[string]interface{}) // sync pending block so any node can run L2
 	mempoolAddCB        func(txMap map[string]interface{})           // add TX to local mempool (sync from peer)
@@ -76,6 +75,7 @@ type NodesManager struct {
 
 	knownPeerAddrs map[string]struct{}
 	peerTLSConfig  *tls.Config
+	identity       *NodeIdentity
 
 	mu sync.RWMutex
 }
@@ -129,11 +129,15 @@ func peerWebSocketDialURLsEqual(a, b string) bool {
 	return e1 == nil && e2 == nil && na == nb
 }
 
-// NewNodesManager creates a new nodes manager
+// NewNodesManager creates a new nodes manager with a persisted Ed25519 identity.
 func NewNodesManager(port int, host string) *NodesManager {
-	nodeID := uuid.New().String()
+	id, err := LoadOrCreateIdentity(IdentityPathForPort(port))
+	if err != nil {
+		log.Fatalf("[NODE] identity load/create failed: %v", err)
+	}
 	return &NodesManager{
-		nodeID:              nodeID,
+		nodeID:              id.NodeID,
+		identity:            id,
 		nodeHost:            host,
 		nodePort:            port,
 		nodeAddress:         fmt.Sprintf("ws://%s:%d", host, port),
@@ -143,6 +147,30 @@ func NewNodesManager(port int, host string) *NodesManager {
 		seenEvents:          make(map[string]time.Time),
 		knownPeerAddrs:      make(map[string]struct{}),
 	}
+}
+
+// Identity returns the persistent node keypair (may be nil only in tests).
+func (nm *NodesManager) Identity() *NodeIdentity {
+	return nm.identity
+}
+
+// SignedVotePayload builds an l1_vote / l2_vote event body with Ed25519 signature.
+func (nm *NodesManager) SignedVotePayload(blockID string, yes bool) map[string]interface{} {
+	payload := map[string]interface{}{
+		"blockId": blockID,
+		"nodeId":  nm.nodeID,
+		"yes":     yes,
+	}
+	if nm.identity != nil {
+		sig, err := nm.identity.SignVote(blockID, yes)
+		if err == nil {
+			payload["pubKey"] = nm.identity.PubKey
+			payload["signature"] = sig
+		} else {
+			log.Printf("[NODE] vote sign failed: %v", err)
+		}
+	}
+	return payload
 }
 
 // GetNodeID returns the node's unique ID
@@ -238,8 +266,8 @@ func (nm *NodesManager) SetL1ProposalCallback(fn func(blockId, proposerNodeId st
 	nm.l1ProposalCB = fn
 }
 
-// SetL1VoteCallback sets callback for l1_vote (blockId, nodeId, yes). Called when we receive l1_vote.
-func (nm *NodesManager) SetL1VoteCallback(fn func(blockId, nodeId string, yes bool)) {
+// SetL1VoteCallback sets callback for l1_vote. Called when we receive l1_vote.
+func (nm *NodesManager) SetL1VoteCallback(fn func(blockId, nodeId string, yes bool, pubKey, signature string)) {
 	nm.voteCBMu.Lock()
 	defer nm.voteCBMu.Unlock()
 	nm.l1VoteCB = fn
@@ -252,8 +280,8 @@ func (nm *NodesManager) SetL2ProposalCallback(fn func(blockId, proposerNodeId st
 	nm.l2ProposalCB = fn
 }
 
-// SetL2VoteCallback sets callback for l2_vote (blockId, nodeId, yes). Called when we receive l2_vote.
-func (nm *NodesManager) SetL2VoteCallback(fn func(blockId, nodeId string, yes bool)) {
+// SetL2VoteCallback sets callback for l2_vote. Called when we receive l2_vote.
+func (nm *NodesManager) SetL2VoteCallback(fn func(blockId, nodeId string, yes bool, pubKey, signature string)) {
 	nm.voteCBMu.Lock()
 	defer nm.voteCBMu.Unlock()
 	nm.l2VoteCB = fn
@@ -941,8 +969,10 @@ func (nm *NodesManager) handleBlockchainEvent(msg map[string]interface{}) {
 			blockId, _ := payload["blockId"].(string)
 			nodeId, _ := payload["nodeId"].(string)
 			yes, _ := payload["yes"].(bool)
+			pubKey, _ := payload["pubKey"].(string)
+			signature, _ := payload["signature"].(string)
 			nm.voteCBMu.RUnlock()
-			nm.l1VoteCB(blockId, nodeId, yes)
+			nm.l1VoteCB(blockId, nodeId, yes, pubKey, signature)
 			nm.voteCBMu.RLock()
 		}
 	case "l2_proposal":
@@ -959,8 +989,10 @@ func (nm *NodesManager) handleBlockchainEvent(msg map[string]interface{}) {
 			blockId, _ := payload["blockId"].(string)
 			nodeId, _ := payload["nodeId"].(string)
 			yes, _ := payload["yes"].(bool)
+			pubKey, _ := payload["pubKey"].(string)
+			signature, _ := payload["signature"].(string)
 			nm.voteCBMu.RUnlock()
-			nm.l2VoteCB(blockId, nodeId, yes)
+			nm.l2VoteCB(blockId, nodeId, yes, pubKey, signature)
 			nm.voteCBMu.RLock()
 		}
 	case "mempool:add":

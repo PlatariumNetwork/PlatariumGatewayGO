@@ -137,7 +137,10 @@ If Core CLI or state file is unavailable, balance/faucet endpoints return **503 
 
 | Setting | Description |
 |---------|-------------|
-| `PLATARIUM_ALLOW_DEGRADED_CONSENSUS` | `true` (default): accept L1/L2 with proposer-only vote when peers do not respond. Set `false` for strict multi-node mode. |
+| `PLATARIUM_ALLOW_DEGRADED_CONSENSUS` | `false` (default): reject L1/L2 when only the proposer’s vote arrives. Set `true` only for emergency/demo. |
+| `PLATARIUM_ALLOW_UNSIGNED_VOTES` | `false` (default): peer L1/L2 votes must carry Ed25519 `pubKey`+`signature`. Set `true` only for legacy peers. |
+| `PLATARIUM_BLOCK_CYCLE_AUTO_CONFIRM` | Unset: auto-confirm only on solo testnet. `false` never; `true` only when zero peers. |
+| `PLATARIUM_NODE_IDENTITY_FILE` | Persistent node keypair path (default `data/node_identity_<wsPort>.json`). |
 | `PLATARIUM_OPERATOR_WALLET` | Operator `Px…` wallet. When this node earns L1/L2 fee shares, credits fee (μPLP) to the wallet and reports Contributor Leaderboard XP (min 10; scales with network load + selection-weight distribution). |
 | `PLATARIUM_CONTRIBUTORS_API_URL` | Scan base URL for XP reporting (e.g. `https://platarium.network`). Public endpoint — no shared secret. |
 | `PLATARIUM_AUTO_BLOCK` | `true` on testnet (default): background worker runs L1/L2 automatically. Set `false` to disable. |

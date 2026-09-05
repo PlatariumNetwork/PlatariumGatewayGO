@@ -379,9 +379,7 @@ func (h *Handler) submitL1Vote(blockId, proposerNodeId string, txCount int, txHa
 		logger.Info("L1 proposal from %s: mempool not ready (txCount=%d hashes=%d)", shortId(proposerNodeId), txCount, len(txHashes))
 	}
 	logger.Info("L1 received proposal from %s (txCount=%d), sending vote yes=%v", shortId(proposerNodeId), txCount, yes)
-	go h.nodesManager.BroadcastBlockchainEvent("l1_vote", map[string]interface{}{
-		"blockId": blockId, "nodeId": myId, "yes": yes,
-	}, myId)
+	go h.nodesManager.BroadcastBlockchainEvent("l1_vote", h.nodesManager.SignedVotePayload(blockId, yes), myId)
 }
 
 func (h *Handler) submitL2Vote(blockId, proposerNodeId string, txHashes []string) {
@@ -416,9 +414,7 @@ func (h *Handler) submitL2Vote(blockId, proposerNodeId string, txHashes []string
 		logger.Info("L2 proposal from %s: pending block not ready (hashes=%d)", shortId(proposerNodeId), len(txHashes))
 	}
 	logger.Info("L2 received proposal from %s blockId=%s..., sending vote yes=%v", shortId(proposerNodeId), shortId(blockId), yes)
-	go h.nodesManager.BroadcastBlockchainEvent("l2_vote", map[string]interface{}{
-		"blockId": blockId, "nodeId": myId, "yes": yes,
-	}, myId)
+	go h.nodesManager.BroadcastBlockchainEvent("l2_vote", h.nodesManager.SignedVotePayload(blockId, yes), myId)
 }
 
 func votesToCoreJSON(votes map[string]bool) (string, error) {
@@ -441,7 +437,8 @@ func votesToCoreJSON(votes map[string]bool) (string, error) {
 func allowDegradedConsensus() bool {
 	v := os.Getenv("PLATARIUM_ALLOW_DEGRADED_CONSENSUS")
 	if v == "" {
-		return true
+		// P0: strict multi-node by default (proposer-only accept is opt-in).
+		return false
 	}
 	return strings.EqualFold(v, "1") || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
 }

@@ -979,13 +979,30 @@ func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block Block
 }
 
 // AddConfirmedBlock adds a block received from a peer. Returns false if the block is already known.
+// On same-height different hash: prefer stronger vote score; automatic reorg is not supported (P0 detect).
 func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (bool, error) {
 	bc.mu.Lock()
 	for _, b := range bc.blockHistory {
-		if b.BlockNumber == block.BlockNumber {
+		if b.BlockNumber != block.BlockNumber {
+			continue
+		}
+		if b.BlockHash != "" && block.BlockHash != "" && b.BlockHash == block.BlockHash {
 			bc.mu.Unlock()
 			return false, nil
 		}
+		if b.BlockHash == block.BlockHash && block.BlockHash == "" {
+			bc.mu.Unlock()
+			return false, nil
+		}
+		// Competing block at same height
+		if PreferBlock(b, block) {
+			bc.mu.Unlock()
+			return false, fmt.Errorf("%w at height %d: peer block preferred (L2Yes=%d hash=%s) but reorg unsupported; local keeps %s",
+				ErrForkConflict, block.BlockNumber, block.L2Yes, shortHash(block.BlockHash), shortHash(b.BlockHash))
+		}
+		bc.mu.Unlock()
+		return false, fmt.Errorf("%w at height %d: keeping local block (L2Yes=%d hash=%s) over peer (L2Yes=%d hash=%s)",
+			ErrForkConflict, block.BlockNumber, b.L2Yes, shortHash(b.BlockHash), block.L2Yes, shortHash(block.BlockHash))
 	}
 	bc.mu.Unlock()
 
@@ -1047,6 +1064,13 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 		return false, err
 	}
 	return true, nil
+}
+
+func shortHash(h string) string {
+	if len(h) <= 12 {
+		return h
+	}
+	return h[:12]
 }
 
 // GetAllTransactions returns a stable snapshot of the in-memory transaction index.

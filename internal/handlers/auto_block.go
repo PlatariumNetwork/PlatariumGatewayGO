@@ -68,6 +68,24 @@ func coreBlockCycleEnabled(h *Handler) bool {
 	}
 }
 
+// allowBlockCycleAutoConfirm synthesizes Core L1/L2 votes only for explicit solo/testnet.
+// Multi-peer networks must collect real peer votes (P0).
+func allowBlockCycleAutoConfirm(h *Handler) bool {
+	if h == nil {
+		return false
+	}
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("PLATARIUM_BLOCK_CYCLE_AUTO_CONFIRM"))); v != "" {
+		switch v {
+		case "0", "false", "no", "off":
+			return false
+		case "1", "true", "yes", "on":
+			return len(h.nodesManager.GetConnectedNodes()) == 0
+		}
+	}
+	// Default: sole producer on testnet only.
+	return h.testnet && len(h.nodesManager.GetConnectedNodes()) == 0
+}
+
 func (h *Handler) pruneMempoolBeforeL1() int {
 	removed := h.blockchain.PruneMempool()
 	if removed > 0 {
@@ -158,8 +176,9 @@ func (h *Handler) autoBlockCollectViaCycle() bool {
 		PreviousHash: prevHash,
 		Timestamp:    time.Now().Unix(),
 		ProducerID:   h.nodesManager.GetNodeID(),
-		AutoConfirm:  true,
-		ApplyTxs:     false, // L2ConfirmBlock applies state once
+		// P0: auto_confirm only for explicit solo/testnet shortcut; multi-peer never synthesizes votes.
+		AutoConfirm: allowBlockCycleAutoConfirm(h),
+		ApplyTxs:    false, // L2ConfirmBlock applies state once
 	})
 	if err != nil {
 		logger.Warn("block_cycle failed, falling back to L1 collect: %v", err)

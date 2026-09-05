@@ -530,7 +530,10 @@ func (h *Handler) onL2Proposal(blockId, proposerNodeId string, txHashes []string
 	go h.submitL2Vote(blockId, proposerNodeId, txHashes)
 }
 
-func (h *Handler) onL1Vote(blockId, nodeId string, yes bool) {
+func (h *Handler) onL1Vote(blockId, nodeId string, yes bool, pubKey, signature string) {
+	if !h.acceptPeerVote(blockId, nodeId, yes, pubKey, signature, true) {
+		return
+	}
 	h.l1VoteRoundMu.Lock()
 	r := h.l1VoteRound
 	h.l1VoteRoundMu.Unlock()
@@ -545,7 +548,12 @@ func (h *Handler) onL1Vote(blockId, nodeId string, yes bool) {
 	if r.closed {
 		return
 	}
-	if _, exists := r.votes[nodeId]; exists {
+	if prev, exists := r.votes[nodeId]; exists {
+		if prev != yes {
+			logger.Warn("L1 equivocation node=%s block=%s", shortId(nodeId), shortId(blockId))
+			h.nodeRegistry.EnsureNode(nodeId, 0, 1)
+			_ = h.nodeRegistry.ApplySlash(nodeId, rating.SlashEquivocation)
+		}
 		return
 	}
 	r.votes[nodeId] = yes
@@ -969,7 +977,10 @@ func (h *Handler) onBlockConfirmed(data map[string]interface{}) {
 	}
 }
 
-func (h *Handler) onL2Vote(blockId, nodeId string, yes bool) {
+func (h *Handler) onL2Vote(blockId, nodeId string, yes bool, pubKey, signature string) {
+	if !h.acceptPeerVote(blockId, nodeId, yes, pubKey, signature, false) {
+		return
+	}
 	h.l2VoteRoundMu.Lock()
 	r := h.l2VoteRound
 	h.l2VoteRoundMu.Unlock()
@@ -984,7 +995,12 @@ func (h *Handler) onL2Vote(blockId, nodeId string, yes bool) {
 	if r.closed {
 		return
 	}
-	if _, exists := r.votes[nodeId]; exists {
+	if prev, exists := r.votes[nodeId]; exists {
+		if prev != yes {
+			logger.Warn("L2 equivocation node=%s block=%s", shortId(nodeId), shortId(blockId))
+			h.nodeRegistry.EnsureNode(nodeId, 0, 1)
+			_ = h.nodeRegistry.ApplySlash(nodeId, rating.SlashEquivocation)
+		}
 		return
 	}
 	r.votes[nodeId] = yes
@@ -1004,6 +1020,25 @@ func (h *Handler) onL2Vote(blockId, nodeId string, yes bool) {
 		default:
 		}
 	}
+}
+
+// acceptPeerVote enforces Ed25519 vote signatures (P0) unless unsigned votes are explicitly allowed.
+func (h *Handler) acceptPeerVote(blockId, nodeId string, yes bool, pubKey, signature string, isL1 bool) bool {
+	layer := "L2"
+	if isL1 {
+		layer = "L1"
+	}
+	if nodes.RequireSignedVotes() {
+		if pubKey == "" || signature == "" {
+			logger.Warn("%s vote rejected (unsigned) from %s", layer, shortId(nodeId))
+			return false
+		}
+		if err := nodes.VerifyVoteSignature(nodeId, blockId, yes, pubKey, signature); err != nil {
+			logger.Warn("%s vote rejected from %s: %v", layer, shortId(nodeId), err)
+			return false
+		}
+	}
+	return true
 }
 
 func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
@@ -2641,9 +2676,7 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	go h.nodesManager.BroadcastBlockchainEvent("l1_proposal", map[string]interface{}{
 		"blockId": blockId, "proposerNodeId": myId, "txCount": txCount, "txHashes": stringSliceToInterface(txHashes),
 	}, myId)
-	go h.nodesManager.BroadcastBlockchainEvent("l1_vote", map[string]interface{}{
-		"blockId": blockId, "nodeId": myId, "yes": true,
-	}, myId)
+	go h.nodesManager.BroadcastBlockchainEvent("l1_vote", h.nodesManager.SignedVotePayload(blockId, true), myId)
 
 	// Single-node: no peers receive events (we don't deliver to self), so signal done immediately.
 	if totalExpected == 1 {
@@ -2967,9 +3000,7 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 	go h.nodesManager.BroadcastBlockchainEvent("l2_proposal", map[string]interface{}{
 		"blockId": blockId, "proposerNodeId": myId, "txHashes": stringSliceToInterface(txHashes),
 	}, myId)
-	go h.nodesManager.BroadcastBlockchainEvent("l2_vote", map[string]interface{}{
-		"blockId": blockId, "nodeId": myId, "yes": true,
-	}, myId)
+	go h.nodesManager.BroadcastBlockchainEvent("l2_vote", h.nodesManager.SignedVotePayload(blockId, true), myId)
 
 	// Single-node: no peers receive events (we don't deliver to self), so signal done immediately.
 	if totalExpected == 1 {
