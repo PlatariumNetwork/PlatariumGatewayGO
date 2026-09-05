@@ -13,6 +13,14 @@ import (
 	"platarium-gateway-go/internal/core"
 )
 
+// ErrL2ConfirmTOCTOU is returned when pending mutated after Core apply succeeded.
+var ErrL2ConfirmTOCTOU = errors.New("L2ConfirmBlock TOCTOU")
+
+// IsL2ConfirmTOCTOU reports post-apply fence failures (must not requeue to mempool).
+func IsL2ConfirmTOCTOU(err error) bool {
+	return errors.Is(err, ErrL2ConfirmTOCTOU)
+}
+
 // Transaction represents a blockchain transaction.
 // Core-signed TX: set SigMain, SigDerived, Asset, AmountUplp, FeeUplp (Value/Fee kept for display).
 type Transaction struct {
@@ -631,31 +639,31 @@ func parseFee(fee string) int64 {
 
 // applyConfirmedTransactions applies each transaction through Core ledger.
 // The state file is snapshotted first so a mid-batch failure can roll back cleanly.
-func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) error {
+// On success returns backupPath; caller must os.Remove(backupPath) after confirm completes.
+func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) (backupPath string, err error) {
 	bc.mu.RLock()
 	ledger := bc.ledger
 	bc.mu.RUnlock()
 	if ledger == nil {
-		return fmt.Errorf("core ledger unavailable")
+		return "", fmt.Errorf("core ledger unavailable")
 	}
 	statePath := ledger.StateFilePath()
-	backupPath := statePath + ".l2bak"
+	backupPath = statePath + ".l2bak"
 	if err := copyFile(statePath, backupPath); err != nil {
-		return fmt.Errorf("snapshot state before L2 apply: %w", err)
+		return "", fmt.Errorf("snapshot state before L2 apply: %w", err)
 	}
-	defer os.Remove(backupPath)
 
 	rollback := func() {
 		if err := copyFile(backupPath, statePath); err != nil {
-			// Best-effort; caller still sees the original apply error.
 			_ = err
 		}
+		os.Remove(backupPath)
 	}
 
-	txs, err := bc.maybeDagReorder(ledger, txs)
+	txs, err = bc.maybeDagReorder(ledger, txs)
 	if err != nil {
 		rollback()
-		return err
+		return "", err
 	}
 
 	// Execution-first path (on by default): batch execute+commit.
@@ -682,9 +690,9 @@ func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) error {
 		if useKernel && len(coreJSONs) > 0 {
 			if _, err := ledger.KernelApplyBatch(coreJSONs); err != nil {
 				rollback()
-				return fmt.Errorf("kernel apply batch: %w", err)
+				return "", fmt.Errorf("kernel apply batch: %w", err)
 			}
-			return nil
+			return backupPath, nil
 		}
 	}
 
@@ -697,21 +705,21 @@ func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) error {
 			uplp := tx.FeeUplp
 			if err := ledger.Credit(tx.To, amt, uplp); err != nil {
 				rollback()
-				return fmt.Errorf("faucet credit %s: %w", tx.Hash, err)
+				return "", fmt.Errorf("faucet credit %s: %w", tx.Hash, err)
 			}
 			continue
 		}
 		coreJSON, ok := ToCoreJSON(tx)
 		if !ok {
 			rollback()
-			return fmt.Errorf("transaction %s is not Core-compatible", tx.Hash)
+			return "", fmt.Errorf("transaction %s is not Core-compatible", tx.Hash)
 		}
 		if _, err := ledger.ApplyTx(coreJSON); err != nil {
 			rollback()
-			return fmt.Errorf("apply tx %s: %w", tx.Hash, err)
+			return "", fmt.Errorf("apply tx %s: %w", tx.Hash, err)
 		}
 	}
-	return nil
+	return backupPath, nil
 }
 
 // maybeDagReorder reorders txs for L2 apply.
@@ -818,7 +826,6 @@ func (bc *Blockchain) AbandonPendingBlock(drop []string) (returned, dropped int)
 	return returned, dropped
 }
 
-// L2ConfirmBlock moves pending block into chain (L2 confirmed), applying state via Core.
 func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord, err error) {
 	bc.mu.Lock()
 	pendingCopy := make([]*Transaction, len(bc.pendingBlock))
@@ -831,15 +838,29 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 	}
 	bc.mu.Unlock()
 
-	if err := bc.applyConfirmedTransactions(pendingCopy); err != nil {
-		return nil, BlockRecord{}, err
+	backupPath, applyErr := bc.applyConfirmedTransactions(pendingCopy)
+	if applyErr != nil {
+		return nil, BlockRecord{}, applyErr
+	}
+
+	bc.mu.RLock()
+	ledger := bc.ledger
+	bc.mu.RUnlock()
+	statePath := ""
+	if ledger != nil {
+		statePath = ledger.StateFilePath()
 	}
 
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 	// H9: abort if pending set changed while we applied the copy.
 	if len(bc.pendingBlock) != len(pendingCopy) {
-		return nil, BlockRecord{}, fmt.Errorf("L2ConfirmBlock TOCTOU: pending changed during apply")
+		if statePath != "" && backupPath != "" {
+			_ = copyFile(backupPath, statePath)
+		}
+		os.Remove(backupPath)
+		bc.pendingBlock = bc.pendingBlock[:0]
+		return nil, BlockRecord{}, fmt.Errorf("%w: pending changed during apply", ErrL2ConfirmTOCTOU)
 	}
 	for i, tx := range bc.pendingBlock {
 		h := ""
@@ -847,9 +868,15 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 			h = tx.Hash
 		}
 		if i >= len(pendingFinger) || h != pendingFinger[i] {
-			return nil, BlockRecord{}, fmt.Errorf("L2ConfirmBlock TOCTOU: pending hash mismatch at %d", i)
+			if statePath != "" && backupPath != "" {
+				_ = copyFile(backupPath, statePath)
+			}
+			os.Remove(backupPath)
+			bc.pendingBlock = bc.pendingBlock[:0]
+			return nil, BlockRecord{}, fmt.Errorf("%w: pending hash mismatch at %d", ErrL2ConfirmTOCTOU, i)
 		}
 	}
+	os.Remove(backupPath)
 	block = BlockRecord{
 		BlockNumber: bc.blockCounter,
 		Timestamp:   0,
@@ -901,8 +928,12 @@ func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block Block
 	copy(mempoolCopy, bc.mempool)
 	bc.mu.Unlock()
 
-	if err := bc.applyConfirmedTransactions(mempoolCopy); err != nil {
+	backupPath, err := bc.applyConfirmedTransactions(mempoolCopy)
+	if err != nil {
 		return nil, BlockRecord{}, err
+	}
+	if backupPath != "" {
+		os.Remove(backupPath)
 	}
 
 	bc.mu.Lock()
@@ -958,8 +989,12 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 	}
 	bc.mu.Unlock()
 
-	if err := bc.applyConfirmedTransactions(txs); err != nil {
+	backupPath, err := bc.applyConfirmedTransactions(txs)
+	if err != nil {
 		return false, err
+	}
+	if backupPath != "" {
+		os.Remove(backupPath)
 	}
 
 	bc.mu.Lock()

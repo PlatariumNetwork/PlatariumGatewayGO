@@ -254,6 +254,11 @@ func main() {
 	router.HandleFunc("/api/escrow/settled", handler.AckEscrowSettled).Methods("POST")
 	router.HandleFunc("/api/escrow/{id}", handler.GetEscrowStatus).Methods("GET")
 
+	// Desk ML proxy (Phase 3 / Sprint 1)
+	router.HandleFunc("/api/ai/chat/completions", handler.AiChatCompletions).Methods("POST")
+	router.HandleFunc("/api/ai/quota", handler.AiQuota).Methods("GET")
+	router.HandleFunc("/api/ai/models", handler.AiModels).Methods("GET")
+
 	// Serve index.html at root and /index.html (must be last to not interfere with other routes)
 	router.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./web/index.html")

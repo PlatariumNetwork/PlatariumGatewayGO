@@ -3083,12 +3083,15 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 
 	moved, block, err := h.blockchain.L2ConfirmBlock()
 	if err != nil {
+		if blockchain.IsL2ConfirmTOCTOU(err) {
+			logger.Warn("L2 confirm TOCTOU: state rolled back, pending cleared (no requeue): %v", err)
+			jsonResponse(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
 		logger.Warn("L2 confirm apply failed: %v", err)
-		// Never discard on apply failure: state was rolled back, so the whole
-		// pending pack is still valid against pre-apply state. Permanent poison
-		// is removed on the next tick by validateTxsForL1 / mempool prune.
+		// Pre-apply failure: state was rolled back; pending pack still valid — requeue.
 		returned, dropped := h.blockchain.AbandonPendingBlock(nil)
-		logger.Warn("L2 confirm recovery: returned=%d dropped=%d (requeue all after apply fail)", returned, dropped)
+		logger.Warn("L2 confirm recovery: returned=%d dropped=%d (requeue after apply fail)", returned, dropped)
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

@@ -206,7 +206,7 @@ func (h *Handler) autoBlockConfirmPending() bool {
 	h.L2ConfirmBlock(w, autoBlockPOST())
 	if w.status >= 400 && w.status != 0 {
 		logger.Warn("Auto L2 confirm finished with HTTP %d body=%s", w.status, string(w.body))
-		if len(h.blockchain.GetPendingBlock()) > 0 {
+		if len(h.blockchain.GetPendingBlock()) > 0 && !strings.Contains(string(w.body), "TOCTOU") {
 			returned, dropped := h.blockchain.AbandonPendingBlock(nil)
 			logger.Warn("Auto L2 recovery: returned=%d dropped=%d", returned, dropped)
 		}
