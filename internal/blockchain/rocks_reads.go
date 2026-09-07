@@ -189,6 +189,8 @@ func (bc *Blockchain) getAccountFromRocks(address string) (*core.AccountQuery, e
 		Balance:     acct.Balance,
 		UplpBalance: acct.UplpBalance,
 		Nonce:       acct.Nonce,
+		Tokens:      acct.Tokens,
+		Xp:          acct.Xp,
 	}, nil
 }
 

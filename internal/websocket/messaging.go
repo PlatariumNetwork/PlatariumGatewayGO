@@ -756,9 +756,28 @@ func (s *Server) handleContactPricingAnnounce(client *Client, data map[string]in
 	if ce == nil {
 		return
 	}
+	addr := strings.TrimSpace(client.Address)
+	if addr == "" {
+		_ = client.Conn.WriteJSON(map[string]interface{}{
+			"type": "contactPricingError",
+			"data": map[string]interface{}{"error": "authenticated address required"},
+		})
+		return
+	}
+	sig := strField(data, "signature")
+	mnemonic := strField(data, "mnemonic")
+	alphanumeric := strField(data, "alphanumeric")
+	// R2-M5: WS already binds Address to the socket identity; still require ownership proof.
+	if mnemonic == "" && alphanumeric == "" && !strings.HasPrefix(sig, "sig-core:") && !strings.HasPrefix(sig, "owned:") {
+		_ = client.Conn.WriteJSON(map[string]interface{}{
+			"type": "contactPricingError",
+			"data": map[string]interface{}{"error": "ownership proof required (mnemonic+alphanumeric or sig-core)"},
+		})
+		return
+	}
 	p := contacteconomy.PricingAnnounce{
-		Address:   client.Address,
-		Signature: strField(data, "signature"),
+		Address:   addr,
+		Signature: sig,
 		Blocked:   false,
 	}
 	if v, ok := data["blocked"].(bool); ok {

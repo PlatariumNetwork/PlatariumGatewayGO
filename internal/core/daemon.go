@@ -32,10 +32,10 @@ func EnsureCoreRPCAuthEnv() {
 }
 
 var (
-	daemonMu      sync.Mutex
-	daemonCmd     *exec.Cmd
-	daemonOwned   bool
-	daemonListen  string
+	daemonMu       sync.Mutex
+	daemonCmd      *exec.Cmd
+	daemonOwned    bool
+	daemonListen   string
 	daemonLockFile *os.File
 	daemonLogFile  *os.File
 )
@@ -227,7 +227,7 @@ func openDaemonLog(logPath string) (*os.File, error) {
 			return nil, fmt.Errorf("core log dir: %w", err)
 		}
 	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("core log open %s: %w", logPath, err)
 	}
@@ -235,7 +235,7 @@ func openDaemonLog(logPath string) (*os.File, error) {
 }
 
 func writeDaemonPID(pidPath string, pid int) error {
-	return os.WriteFile(pidPath, []byte(strconv.Itoa(pid)+"\n"), 0o644)
+	return os.WriteFile(pidPath, []byte(strconv.Itoa(pid)+"\n"), 0o600)
 }
 
 func readDaemonPID(pidPath string) (int, error) {

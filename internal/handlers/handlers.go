@@ -86,9 +86,9 @@ type Handler struct {
 	faucetStore     *faucet.CooldownStore
 	faucetAmountPLP uint64
 
-	contactEconomy     *contacteconomy.Store
-	contactRate        *ratelimit.Limiter
-	channelIdentity    *channelidentity.Store
+	contactEconomy  *contacteconomy.Store
+	contactRate     *ratelimit.Limiter
+	channelIdentity *channelidentity.Store
 
 	autoBlockMu sync.Mutex
 
@@ -1483,19 +1483,26 @@ func (h *Handler) Faucet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
-	if h.faucetStore != nil {
-		if wait := h.faucetStore.Remaining(address, now); wait > 0 {
-			hours, minutes, seconds, label := faucet.FormatWait(wait)
-			jsonResponse(w, http.StatusTooManyRequests, map[string]interface{}{
-				"error":             "cooldown",
-				"message":           fmt.Sprintf("You can request test PLP again in %s.", label),
-				"retryAfterSeconds": int(wait.Seconds()),
-				"hours":             hours,
-				"minutes":           minutes,
-				"seconds":           seconds,
-			})
-			return
-		}
+	if h.faucetStore == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "faucet cooldown store unavailable"})
+		return
+	}
+	wait, claimErr := h.faucetStore.TryClaim(address, now)
+	if claimErr != nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "faucet cooldown persist failed"})
+		return
+	}
+	if wait > 0 {
+		hours, minutes, seconds, label := faucet.FormatWait(wait)
+		jsonResponse(w, http.StatusTooManyRequests, map[string]interface{}{
+			"error":             "cooldown",
+			"message":           fmt.Sprintf("You can request test PLP again in %s.", label),
+			"retryAfterSeconds": int(wait.Seconds()),
+			"hours":             hours,
+			"minutes":           minutes,
+			"seconds":           seconds,
+		})
+		return
 	}
 	amount := h.faucetAmountPLP
 	if amount == 0 {
@@ -1503,13 +1510,9 @@ func (h *Handler) Faucet(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, err := h.blockchain.InstantFaucetCredit(address, amount)
 	if err != nil {
+		_ = h.faucetStore.ReleaseClaim(address)
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
-	}
-	if h.faucetStore != nil {
-		if err := h.faucetStore.RecordClaim(address, now); err != nil {
-			logger.Warn("faucet cooldown record failed for %s: %v", address, err)
-		}
 	}
 	query, qerr := h.blockchain.GetAccountQuery(address)
 	balance := "0"
@@ -2385,6 +2388,45 @@ func (h *Handler) sendRewardCreditL1(restBaseURL string, amount int64) {
 // Header set when forwarding L1/L2 so the target node knows it was selected and must run (no re-forward).
 const HeaderSelectedNode = "X-Platarium-Selected-Node"
 
+// HeaderInternalForward marks a peer-to-peer forward (R2-H8). Client-supplied Selected-Node is ignored without it.
+const HeaderInternalForward = "X-Platarium-Internal-Forward"
+
+func consensusAuthToken() string {
+	expected := strings.TrimSpace(os.Getenv("PLATARIUM_CONSENSUS_TOKEN"))
+	if expected == "" {
+		expected = strings.TrimSpace(os.Getenv("PLATARIUM_CORE_RPC_TOKEN"))
+	}
+	return expected
+}
+
+func consensusTokenFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	got := strings.TrimSpace(r.Header.Get("X-Platarium-Consensus-Token"))
+	if got == "" {
+		auth := r.Header.Get("Authorization")
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			got = strings.TrimSpace(auth[7:])
+		}
+	}
+	return got
+}
+
+// isTrustedForward accepts Selected-Node only from authenticated internal forwards (R2-H8).
+func isTrustedForward(r *http.Request) bool {
+	if r == nil || r.Header.Get(HeaderInternalForward) != "1" {
+		return false
+	}
+	expected := consensusAuthToken()
+	if expected == "" {
+		insecure := strings.EqualFold(strings.TrimSpace(os.Getenv("PLATARIUM_CONSENSUS_INSECURE")), "1") ||
+			strings.EqualFold(strings.TrimSpace(os.Getenv("PLATARIUM_CONSENSUS_INSECURE")), "true")
+		return insecure
+	}
+	return consensusTokenFromRequest(r) == expected
+}
+
 // forwardPostToNode forwards POST to peer's REST URL and copies response back; returns true if forwarded.
 // If selectedNodeID is non-empty, the request includes that header so the target runs without re-selecting (stops forward chain).
 func (h *Handler) forwardPostToNode(restBaseURL, path, selectedNodeID string, w http.ResponseWriter) bool {
@@ -2398,6 +2440,10 @@ func (h *Handler) forwardPostToNode(restBaseURL, path, selectedNodeID string, w 
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(HeaderInternalForward, "1")
+	if tok := consensusAuthToken(); tok != "" {
+		req.Header.Set("X-Platarium-Consensus-Token", tok)
+	}
 	if selectedNodeID != "" {
 		req.Header.Set(HeaderSelectedNode, selectedNodeID)
 	}
@@ -2430,8 +2476,8 @@ func (h *Handler) L1CollectBlock(w http.ResponseWriter, r *http.Request) {
 	}
 	myId := h.nodesManager.GetNodeID()
 	selectedHeader := r.Header.Get(HeaderSelectedNode)
-	// If we received a forward with ourselves as selected, we are the proposer - run L1 without re-selecting (stops chain).
-	if selectedHeader == myId {
+	// If we received a trusted forward with ourselves as selected, we are the proposer - run L1 without re-selecting (stops chain).
+	if selectedHeader == myId && isTrustedForward(r) {
 		logger.Info("L1 running as selected proposer (forwarded to us)")
 		h.l1CollectBlockRun(w, r)
 		return
@@ -2460,10 +2506,12 @@ func (h *Handler) L1CollectBlock(w http.ResponseWriter, r *http.Request) {
 			if h.forwardPostToNode(restURL, "/api/l1-collect", selected, w) {
 				return
 			}
-			logger.Warn("L1 forward failed, running locally")
-		} else {
-			logger.Warn("L1 selected %s but no RestURL, running locally", shortId(selected))
+			// R2-H8: do not run local after a failed forward (avoids Selected-Node spoof fallback).
+			logger.Warn("L1 forward failed; refusing local fallback")
+			jsonResponse(w, http.StatusBadGateway, map[string]string{"error": "forward to selected proposer failed"})
+			return
 		}
+		logger.Warn("L1 selected %s but no RestURL, running locally", shortId(selected))
 	}
 	h.l1CollectBlockRun(w, r)
 }
@@ -2808,7 +2856,7 @@ func (h *Handler) L2ConfirmBlock(w http.ResponseWriter, r *http.Request) {
 	}
 	myId := h.nodesManager.GetNodeID()
 	selectedHeader := r.Header.Get(HeaderSelectedNode)
-	if selectedHeader == myId {
+	if selectedHeader == myId && isTrustedForward(r) {
 		logger.Info("L2 running as selected confirmer (forwarded to us)")
 		h.l2ConfirmBlockRun(w, r)
 		return
@@ -2833,10 +2881,11 @@ func (h *Handler) L2ConfirmBlock(w http.ResponseWriter, r *http.Request) {
 			if h.forwardPostToNode(restURL, "/api/l2-confirm", selected, w) {
 				return
 			}
-			logger.Warn("L2 forward failed, running locally")
-		} else {
-			logger.Warn("L2 selected %s but no RestURL, running locally", shortId(selected))
+			logger.Warn("L2 forward failed; refusing local fallback")
+			jsonResponse(w, http.StatusBadGateway, map[string]string{"error": "forward to selected confirmer failed"})
+			return
 		}
+		logger.Warn("L2 selected %s but no RestURL, running locally", shortId(selected))
 	}
 	h.l2ConfirmBlockRun(w, r)
 }
@@ -3112,7 +3161,7 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	moved, block, err := h.blockchain.L2ConfirmBlock()
+	moved, block, stateBackup, err := h.blockchain.L2ConfirmBlock()
 	if err != nil {
 		if blockchain.IsL2ConfirmTOCTOU(err) {
 			logger.Warn("L2 confirm TOCTOU: state rolled back, pending cleared (no requeue): %v", err)
@@ -3134,22 +3183,30 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		block.PreviousHash = header.PreviousHash
 		block.ProducerNodeID = myId
 		if err := h.commitBlockToRocks(block, moved, header.StateRoot); err != nil {
-			// H10: fail-closed — do not report L2 success if canonical Rocks commit failed.
+			// H10 / R2-H2: roll Core + explorer tip back when Rocks fails after apply.
 			logger.Error("RocksDB commit after L2 confirm FAILED: %v", err)
+			if undoErr := h.blockchain.UndoLastConfirmedBlock(block, moved, stateBackup); undoErr != nil {
+				logger.Error("L2 rocks-fail rollback also failed: %v", undoErr)
+			}
 			jsonResponse(w, http.StatusInternalServerError, map[string]string{
 				"error": "rocks commit failed after L2 confirm: " + err.Error(),
 			})
 			return
 		}
+		blockchain.DiscardStateBackup(stateBackup)
 	} else {
 		// M6: with Rocks authoritative, L2 without header/commit leaves dual ledgers divergent.
 		if h.blockchain.RocksEnabled() {
 			logger.Error("assemble-block failed after L2 with Rocks enabled: %v", hdrErr)
+			if undoErr := h.blockchain.UndoLastConfirmedBlock(block, moved, stateBackup); undoErr != nil {
+				logger.Error("L2 assemble-fail rollback also failed: %v", undoErr)
+			}
 			jsonResponse(w, http.StatusInternalServerError, map[string]string{
 				"error": "assemble-block required when Rocks is authoritative: " + hdrErr.Error(),
 			})
 			return
 		}
+		blockchain.DiscardStateBackup(stateBackup)
 		logger.Warn("assemble-block failed after L2 confirm: %v", hdrErr)
 		// Still persist explorer cache without hashes so txs/blocks survive restart.
 		if err := h.blockchain.PersistChainSnapshot(); err != nil {
@@ -3280,7 +3337,7 @@ func (h *Handler) ConfirmBlock(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
 		return
 	}
-	moved, block, err := h.blockchain.ConfirmMempoolToChain()
+	moved, block, stateBackup, err := h.blockchain.ConfirmMempoolToChain()
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -3294,19 +3351,27 @@ func (h *Handler) ConfirmBlock(w http.ResponseWriter, r *http.Request) {
 		block.PreviousHash = header.PreviousHash
 		if err := h.commitBlockToRocks(block, moved, header.StateRoot); err != nil {
 			logger.Error("RocksDB commit after legacy confirm FAILED: %v", err)
+			if undoErr := h.blockchain.UndoLastConfirmedBlock(block, moved, stateBackup); undoErr != nil {
+				logger.Error("legacy rocks-fail rollback also failed: %v", undoErr)
+			}
 			jsonResponse(w, http.StatusInternalServerError, map[string]string{
 				"error": "rocks commit failed after confirm: " + err.Error(),
 			})
 			return
 		}
+		blockchain.DiscardStateBackup(stateBackup)
 	} else {
 		if h.blockchain.RocksEnabled() {
 			logger.Error("assemble-block failed after legacy confirm with Rocks enabled: %v", hdrErr)
+			if undoErr := h.blockchain.UndoLastConfirmedBlock(block, moved, stateBackup); undoErr != nil {
+				logger.Error("legacy assemble-fail rollback also failed: %v", undoErr)
+			}
 			jsonResponse(w, http.StatusInternalServerError, map[string]string{
 				"error": "assemble-block required when Rocks is authoritative: " + hdrErr.Error(),
 			})
 			return
 		}
+		blockchain.DiscardStateBackup(stateBackup)
 		logger.Warn("assemble-block failed after legacy confirm: %v", hdrErr)
 		_ = h.blockchain.PersistChainSnapshot()
 	}

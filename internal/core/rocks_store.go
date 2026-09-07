@@ -9,10 +9,12 @@ import (
 
 // RocksAccount is an account record from rocks_get_account.
 type RocksAccount struct {
-	Address     string `json:"address"`
-	Balance     string `json:"balance"`
-	UplpBalance string `json:"uplp_balance"`
-	Nonce       uint64 `json:"nonce"`
+	Address     string            `json:"address"`
+	Balance     string            `json:"balance"`
+	UplpBalance string            `json:"uplp_balance"`
+	Nonce       uint64            `json:"nonce"`
+	Tokens      map[string]string `json:"tokens,omitempty"`
+	Xp          string            `json:"xp,omitempty"`
 }
 
 // RocksBlockStored matches Core BlockRecordStored (rocks_get_block).
@@ -29,11 +31,11 @@ type RocksBlockStored struct {
 
 // BlockCommitPayload matches Core BlockCommit for rocks_commit_block.
 type BlockCommitPayload struct {
-	Block      RocksBlockStored `json:"block"`
-	TxJSONs    []string         `json:"tx_jsons"`
-	Accounts   []RocksAccount   `json:"accounts"`
-	Receipts   []BlockReceipt   `json:"receipts"`
-	StateRoot  string           `json:"state_root"`
+	Block     RocksBlockStored `json:"block"`
+	TxJSONs   []string         `json:"tx_jsons"`
+	Accounts  []RocksAccount   `json:"accounts"`
+	Receipts  []BlockReceipt   `json:"receipts"`
+	StateRoot string           `json:"state_root"`
 }
 
 // BlockReceipt matches Core ReceiptRecord.

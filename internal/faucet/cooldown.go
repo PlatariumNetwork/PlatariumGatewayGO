@@ -14,10 +14,10 @@ const defaultCooldown = 24 * time.Hour
 
 // CooldownStore tracks last faucet claim per address (persisted JSON).
 type CooldownStore struct {
-	path      string
-	cooldown  time.Duration
-	mu        sync.Mutex
-	claims    map[string]int64 // normalized address -> unix seconds
+	path     string
+	cooldown time.Duration
+	mu       sync.Mutex
+	claims   map[string]int64 // normalized address -> unix seconds
 }
 
 type filePayload struct {
@@ -115,6 +115,47 @@ func (s *CooldownStore) RecordClaim(address string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.claims[key] = now.Unix()
+	return s.persistLocked()
+}
+
+// TryClaim atomically checks cooldown and persists the claim before credit (R2-H7).
+// On success wait is 0. If still cooling down, returns wait > 0 and nil error.
+// Persist failure returns an error (fail-closed — do not credit).
+func (s *CooldownStore) TryClaim(address string, now time.Time) (wait time.Duration, err error) {
+	key := normalizeAddress(address)
+	if key == "" {
+		return 0, fmt.Errorf("address required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if last, ok := s.claims[key]; ok && last > 0 {
+		next := time.Unix(last, 0).Add(s.cooldown)
+		if now.Before(next) {
+			return next.Sub(now), nil
+		}
+	}
+	prev, had := s.claims[key]
+	s.claims[key] = now.Unix()
+	if err := s.persistLocked(); err != nil {
+		if had {
+			s.claims[key] = prev
+		} else {
+			delete(s.claims, key)
+		}
+		return 0, err
+	}
+	return 0, nil
+}
+
+// ReleaseClaim removes a claim after a failed credit so the address can retry.
+func (s *CooldownStore) ReleaseClaim(address string) error {
+	key := normalizeAddress(address)
+	if key == "" {
+		return fmt.Errorf("address required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.claims, key)
 	return s.persistLocked()
 }
 

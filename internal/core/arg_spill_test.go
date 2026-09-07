@@ -43,6 +43,22 @@ func TestSpillLargeCLIArgsWritesAtFile(t *testing.T) {
 	}
 }
 
+func TestSpillRejectsForeignAtPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PLATARIUM_CLI_SPILL_DIR", dir)
+	evil := filepath.Join(t.TempDir(), "secret.json")
+	if err := os.WriteFile(evil, []byte(`{"x":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, cleanup, err := spillLargeCLIArgs([]string{"state-apply-tx", "--tx", "@" + evil})
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err == nil {
+		t.Fatal("expected rejection of @path outside spill dir")
+	}
+}
+
 func TestSpillUsesAllowlistedDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PLATARIUM_CLI_SPILL_DIR", dir)

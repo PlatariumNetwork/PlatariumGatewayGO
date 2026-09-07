@@ -1,10 +1,24 @@
 package core
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+func isUnderSpillDir(path string) bool {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	root, err := filepath.Abs(spillDir())
+	if err != nil {
+		return false
+	}
+	sep := string(os.PathSeparator)
+	return abs == root || strings.HasPrefix(abs, root+sep)
+}
 
 // Max inline CLI JSON before spilling to a temp file.
 // Linux ARG_MAX is typically ~128KiB–2MiB for the whole argv; mempool snapshots
@@ -58,11 +72,21 @@ func spillLargeCLIArgs(args []string) (out []string, cleanup func(), err error) 
 		}
 		val := args[i+1]
 		i++
-		if strings.HasPrefix(val, "@") || len(val) <= cliJSONSpillBytes {
+		if strings.HasPrefix(val, "@") {
+			// H11: never pass through arbitrary @path — only allow files under spillDir.
+			path := strings.TrimPrefix(val, "@")
+			if !isUnderSpillDir(path) {
+				cleanup()
+				return nil, func() {}, fmt.Errorf("cli @path not under spill dir: %s", path)
+			}
 			out = append(out, val)
 			continue
 		}
-	f, createErr := os.CreateTemp(spillDir(), "platarium-cli-arg-*.json")
+		if len(val) <= cliJSONSpillBytes {
+			out = append(out, val)
+			continue
+		}
+		f, createErr := os.CreateTemp(spillDir(), "platarium-cli-arg-*.json")
 		if createErr != nil {
 			cleanup()
 			return nil, func() {}, createErr

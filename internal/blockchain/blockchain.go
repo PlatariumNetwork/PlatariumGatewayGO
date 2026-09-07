@@ -46,14 +46,14 @@ type Transaction struct {
 	Writes      []string `json:"writes,omitempty"`
 	BlockNumber int64    `json:"blockNumber,omitempty"`
 	// Generic escrow (opaque financial settlement; no social graph)
-	RequestIDHash     string `json:"request_id_hash,omitempty"`
-	EscrowID          string `json:"escrow_id,omitempty"`
-	Purpose           string `json:"purpose,omitempty"`
-	ExpiresAt         int64  `json:"expires_at,omitempty"`
-	SettleOutcome     *uint8 `json:"settle_outcome,omitempty"`
-	SettleOutcomeKey  string `json:"settle_outcome_key,omitempty"`
-	SettlePayee       string `json:"settle_payee,omitempty"`
-	SettleNode        string `json:"settle_node,omitempty"`
+	RequestIDHash    string `json:"request_id_hash,omitempty"`
+	EscrowID         string `json:"escrow_id,omitempty"`
+	Purpose          string `json:"purpose,omitempty"`
+	ExpiresAt        int64  `json:"expires_at,omitempty"`
+	SettleOutcome    *uint8 `json:"settle_outcome,omitempty"`
+	SettleOutcomeKey string `json:"settle_outcome_key,omitempty"`
+	SettlePayee      string `json:"settle_payee,omitempty"`
+	SettleNode       string `json:"settle_node,omitempty"`
 }
 
 // BlockRecord is a record for analytics (block number from 0, time, tx count, fees, L1/L2 votes, duration, miners).
@@ -826,7 +826,7 @@ func (bc *Blockchain) AbandonPendingBlock(drop []string) (returned, dropped int)
 	return returned, dropped
 }
 
-func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord, err error) {
+func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord, backupPath string, err error) {
 	bc.mu.Lock()
 	pendingCopy := make([]*Transaction, len(bc.pendingBlock))
 	copy(pendingCopy, bc.pendingBlock)
@@ -840,7 +840,7 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 
 	backupPath, applyErr := bc.applyConfirmedTransactions(pendingCopy)
 	if applyErr != nil {
-		return nil, BlockRecord{}, applyErr
+		return nil, BlockRecord{}, "", applyErr
 	}
 
 	bc.mu.RLock()
@@ -860,7 +860,7 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 		}
 		os.Remove(backupPath)
 		bc.pendingBlock = bc.pendingBlock[:0]
-		return nil, BlockRecord{}, fmt.Errorf("%w: pending changed during apply", ErrL2ConfirmTOCTOU)
+		return nil, BlockRecord{}, "", fmt.Errorf("%w: pending changed during apply", ErrL2ConfirmTOCTOU)
 	}
 	for i, tx := range bc.pendingBlock {
 		h := ""
@@ -873,10 +873,10 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 			}
 			os.Remove(backupPath)
 			bc.pendingBlock = bc.pendingBlock[:0]
-			return nil, BlockRecord{}, fmt.Errorf("%w: pending hash mismatch at %d", ErrL2ConfirmTOCTOU, i)
+			return nil, BlockRecord{}, "", fmt.Errorf("%w: pending hash mismatch at %d", ErrL2ConfirmTOCTOU, i)
 		}
 	}
-	os.Remove(backupPath)
+	// Keep backupPath until Rocks commit succeeds (H10 / R2-H2).
 	block = BlockRecord{
 		BlockNumber: bc.blockCounter,
 		Timestamp:   0,
@@ -916,24 +916,74 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 	}
 	bc.blockHistory = append(bc.blockHistory, block)
 	if err := bc.persistChain(); err != nil {
-		return moved, block, err
+		// Roll Core back; explorer tip is inconsistent until Undo is called by handler,
+		// but persist failure should also restore Core immediately.
+		if statePath != "" && backupPath != "" {
+			_ = copyFile(backupPath, statePath)
+		}
+		os.Remove(backupPath)
+		return moved, block, "", err
 	}
-	return moved, block, nil
+	return moved, block, backupPath, nil
 }
 
-// ConfirmMempoolToChain moves all mempool transactions into the chain (legacy: one step)
-func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block BlockRecord, err error) {
+// DiscardStateBackup removes a Core state snapshot after Rocks commit succeeds.
+func DiscardStateBackup(backupPath string) {
+	if backupPath != "" {
+		_ = os.Remove(backupPath)
+	}
+}
+
+// UndoLastConfirmedBlock restores Core from backupPath, removes the tip explorer block,
+// and requeues moved txs into pending (H10 / R2-H2 compensating action).
+func (bc *Blockchain) UndoLastConfirmedBlock(block BlockRecord, moved []*Transaction, backupPath string) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	statePath := ""
+	if bc.ledger != nil {
+		statePath = bc.ledger.StateFilePath()
+	}
+	if statePath != "" && backupPath != "" {
+		if err := copyFile(backupPath, statePath); err != nil {
+			return fmt.Errorf("restore core state after rocks failure: %w", err)
+		}
+	}
+	if backupPath != "" {
+		_ = os.Remove(backupPath)
+	}
+	if n := len(bc.blockHistory); n > 0 && bc.blockHistory[n-1].BlockNumber == block.BlockNumber {
+		bc.blockHistory = bc.blockHistory[:n-1]
+		if bc.blockCounter == block.BlockNumber+1 {
+			bc.blockCounter = block.BlockNumber
+		}
+	}
+	bc.totalFeesCollected -= block.TotalFees
+	if bc.totalFeesCollected < 0 {
+		bc.totalFeesCollected = 0
+	}
+	for _, tx := range moved {
+		if tx == nil {
+			continue
+		}
+		delete(bc.transactions, tx.Hash)
+		delete(bc.confirmedHashes, tx.Hash)
+		tx.BlockNumber = 0
+		bc.pendingBlock = append(bc.pendingBlock, tx)
+	}
+	return bc.persistChain()
+}
+
+// ConfirmMempoolToChain moves all mempool transactions into the chain (legacy: one step).
+// Returns Core state backupPath that must be discarded after Rocks succeeds or used for Undo.
+func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block BlockRecord, backupPath string, err error) {
 	bc.mu.Lock()
 	mempoolCopy := make([]*Transaction, len(bc.mempool))
 	copy(mempoolCopy, bc.mempool)
 	bc.mu.Unlock()
 
-	backupPath, err := bc.applyConfirmedTransactions(mempoolCopy)
+	backupPath, err = bc.applyConfirmedTransactions(mempoolCopy)
 	if err != nil {
-		return nil, BlockRecord{}, err
-	}
-	if backupPath != "" {
-		os.Remove(backupPath)
+		return nil, BlockRecord{}, "", err
 	}
 
 	bc.mu.Lock()
@@ -973,9 +1023,13 @@ func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block Block
 	}
 	bc.blockHistory = append(bc.blockHistory, block)
 	if err := bc.persistChain(); err != nil {
-		return moved, block, err
+		if bc.ledger != nil && backupPath != "" {
+			_ = copyFile(backupPath, bc.ledger.StateFilePath())
+		}
+		os.Remove(backupPath)
+		return moved, block, "", err
 	}
-	return moved, block, nil
+	return moved, block, backupPath, nil
 }
 
 // AddConfirmedBlock adds a block received from a peer. Returns false if the block is already known.
