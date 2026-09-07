@@ -378,6 +378,18 @@ func (nm *NodesManager) SetSyncApplyCallback(fn func(data map[string]interface{}
 	nm.syncApplyCB = fn
 }
 
+// NewTestNodesManager builds a NodesManager with the given peer IDs already "connected".
+// For unit tests only — skips identity / network setup.
+func NewTestNodesManager(peerIDs ...string) *NodesManager {
+	nm := &NodesManager{
+		connectedNodes: make(map[string]*PeerConnection, len(peerIDs)),
+	}
+	for _, id := range peerIDs {
+		nm.connectedNodes[id] = &PeerConnection{NodeID: id}
+	}
+	return nm
+}
+
 // GetConnectedNodes returns all connected peer nodes
 func (nm *NodesManager) GetConnectedNodes() []NodeInfo {
 	nm.mu.RLock()
