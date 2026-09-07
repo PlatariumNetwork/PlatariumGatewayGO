@@ -44,8 +44,15 @@ func NewRustCore() (*RustCore, error) {
 			return nil, err
 		}
 		if err := client.Handshake(); err != nil {
-			// Fallback for older Core builds that lack handshake.
+			// R2-M6: Ping-only is insecure (no protocol/token binding). Opt in explicitly.
+			allowPing := strings.EqualFold(strings.TrimSpace(os.Getenv("PLATARIUM_CORE_ALLOW_PING_ONLY")), "1") ||
+				strings.EqualFold(strings.TrimSpace(os.Getenv("PLATARIUM_CORE_ALLOW_PING_ONLY")), "true")
+			if !allowPing {
+				_ = client.Close()
+				return nil, fmt.Errorf("core rpc handshake %s: %w (set PLATARIUM_CORE_ALLOW_PING_ONLY=1 only for legacy Core)", addr, err)
+			}
 			if err2 := client.Ping(); err2 != nil {
+				_ = client.Close()
 				return nil, fmt.Errorf("core rpc handshake/ping %s: %w / %v", addr, err, err2)
 			}
 		}
@@ -184,8 +191,8 @@ func (rc *RustCore) GenerateKeys(mnemonic, alphanumeric string, seedIndex uint32
 	var err error
 	if rc.rpcClient != nil {
 		params := map[string]interface{}{
-			"mnemonic":    mnemonic,
-			"seed_index":  seedIndex,
+			"mnemonic":   mnemonic,
+			"seed_index": seedIndex,
 		}
 		if alphanumeric != "" {
 			params["alphanumeric"] = alphanumeric
@@ -290,24 +297,24 @@ func (rc *RustCore) SignMessage(message interface{}, mnemonic, alphanumeric stri
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize message: %v", err)
 	}
-	
+
 	args := []string{
 		"sign-message",
 		"--message", string(messageJSON),
 		"--mnemonic", mnemonic,
 		"--alphanumeric", alphanumeric,
 	}
-	
+
 	output, err := rc.Execute(args)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Parse output - this is complex, so we'll return raw output for now
 	// In production, you'd want to parse the structured output
 	result := make(map[string]interface{})
 	result["raw"] = output
-	
+
 	// Extract hash
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
@@ -317,7 +324,7 @@ func (rc *RustCore) SignMessage(message interface{}, mnemonic, alphanumeric stri
 			break
 		}
 	}
-	
+
 	return result, nil
 }
 

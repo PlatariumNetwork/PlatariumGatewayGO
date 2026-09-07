@@ -37,7 +37,6 @@ var (
 	peerTLSCA = flag.String("peer-tls-ca", "", "CA bundle for wss peer connections (PLATARIUM_PEER_TLS_CA)")
 )
 
-
 // requireConsensusAuth gates L1/L2 confirm routes (H11).
 // Token: PLATARIUM_CONSENSUS_TOKEN, else PLATARIUM_CORE_RPC_TOKEN.
 // Header: Authorization: Bearer <token> or X-Platarium-Consensus-Token.
@@ -51,8 +50,8 @@ func requireConsensusAuth(next http.HandlerFunc) http.HandlerFunc {
 		insecure := strings.EqualFold(strings.TrimSpace(os.Getenv("PLATARIUM_CONSENSUS_INSECURE")), "1") ||
 			strings.EqualFold(strings.TrimSpace(os.Getenv("PLATARIUM_CONSENSUS_INSECURE")), "true")
 		if expected == "" {
-			if insecure || (*testnet && strings.TrimSpace(os.Getenv("PLATARIUM_CONSENSUS_INSECURE")) == "") {
-				// testnet default: allow without token for local auto-block; set CONSENSUS_TOKEN in shared nets
+			// R2-H3: --testnet must not open L1/L2. Opt in only with PLATARIUM_CONSENSUS_INSECURE=1.
+			if insecure {
 				next(w, r)
 				return
 			}
@@ -194,18 +193,18 @@ func main() {
 
 	// Static file server for web UI
 	router.PathPrefix("/web/").Handler(http.StripPrefix("/web/", http.FileServer(http.Dir("./web/"))))
-	
+
 	// API Routes (must be registered before root handler)
 	router.HandleFunc("/api", handler.HealthCheck).Methods("GET")
 	router.HandleFunc("/network", handler.NetworkStatus).Methods("GET")
 	router.HandleFunc("/sockets", handler.GetSockets).Methods("GET")
-	
+
 	// RPC endpoints for monitoring (must be registered before root handler)
 	router.HandleFunc("/rpc/status", handler.GetDetailedStatus).Methods("GET")
 	router.HandleFunc("/rpc/sockets", handler.GetSockets).Methods("GET")
 	router.HandleFunc("/rpc/ping", handler.PingPeer).Methods("GET")
 	router.HandleFunc("/rpc/v1", handler.ChainRPC).Methods("POST")
-	
+
 	// Blockchain API routes
 	router.HandleFunc("/pg-bal/{address}", handler.GetBalance).Methods("GET")
 	router.HandleFunc("/pg-tx/{hash}", handler.GetTransaction).Methods("GET")
@@ -221,7 +220,7 @@ func main() {
 	router.HandleFunc("/api/stats", handler.GetStats).Methods("GET")
 	router.HandleFunc("/api/accounts", handler.GetAccounts).Methods("GET")
 	router.HandleFunc("/api/demo-sendtx", handler.DemoSendTx).Methods("POST")
-		router.HandleFunc("/api/pending-block", handler.GetPendingBlock).Methods("GET")
+	router.HandleFunc("/api/pending-block", handler.GetPendingBlock).Methods("GET")
 	router.HandleFunc("/api/l1-collect", requireConsensusAuth(handler.L1CollectBlock)).Methods("POST")
 	router.HandleFunc("/api/l2-confirm", requireConsensusAuth(handler.L2ConfirmBlock)).Methods("POST")
 	router.HandleFunc("/api/confirm-block", requireConsensusAuth(handler.ConfirmBlock)).Methods("POST")
@@ -263,7 +262,7 @@ func main() {
 	router.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./web/index.html")
 	}).Methods("GET")
-	
+
 	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Only serve index.html for exact root path
 		if r.URL.Path == "/" {
@@ -351,4 +350,3 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-

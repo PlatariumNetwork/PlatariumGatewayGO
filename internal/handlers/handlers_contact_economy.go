@@ -67,8 +67,8 @@ func (h *Handler) GetContactPricing(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"pricing": p,
 		"protocol": map[string]interface{}{
-			"minFeeUplp": cfg.MinFeeUplp,
-			"maxFeeUplp": cfg.MaxFeeUplp,
+			"minFeeUplp":  cfg.MinFeeUplp,
+			"maxFeeUplp":  cfg.MaxFeeUplp,
 			"timeoutSecs": cfg.TimeoutSecs,
 		},
 	})
@@ -80,17 +80,67 @@ func (h *Handler) SetContactPricing(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "contact economy unavailable"})
 		return
 	}
-	var body contacteconomy.PricingAnnounce
+	var body struct {
+		contacteconomy.PricingAnnounce
+		Mnemonic     string `json:"mnemonic"`
+		Alphanumeric string `json:"alphanumeric"`
+		PubMain      string `json:"pubMain"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	p, err := h.contactEconomy.SetPricing(body)
+	if _, err := h.verifyContactPricingOwnership(body.Address, body.Signature, body.Mnemonic, body.Alphanumeric, body.PubMain); err != nil {
+		jsonResponse(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	p, err := h.contactEconomy.SetPricing(body.PricingAnnounce)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"pricing": p})
+}
+
+func (h *Handler) verifyContactPricingOwnership(address, signature, mnemonic, alphanumeric, pubMain string) (string, error) {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return "", fmt.Errorf("address required")
+	}
+	if mnemonic != "" && alphanumeric != "" {
+		if h.rustCore == nil {
+			return "", fmt.Errorf("core unavailable for ownership proof")
+		}
+		keys, err := h.rustCore.GenerateKeys(mnemonic, alphanumeric, 0)
+		if err != nil {
+			return "", fmt.Errorf("GenerateKeys: %w", err)
+		}
+		pk := keys["publicKey"]
+		if !strings.EqualFold(pk, address) {
+			return "", fmt.Errorf("mnemonic does not match address")
+		}
+		return "owned:" + pk, nil
+	}
+	if strings.HasPrefix(signature, "sig-core:") && h.rustCore != nil {
+		sigHex := strings.TrimPrefix(signature, "sig-core:")
+		pub := pubMain
+		if pub == "" {
+			pub = address
+		}
+		msg := map[string]interface{}{
+			"type":    "contact_pricing",
+			"address": address,
+		}
+		ok, err := h.rustCore.VerifySignature(msg, sigHex, pub)
+		if err != nil {
+			return "", fmt.Errorf("signature verify: %w", err)
+		}
+		if !ok {
+			return "", fmt.Errorf("invalid contact pricing signature")
+		}
+		return signature, nil
+	}
+	return "", fmt.Errorf("provide mnemonic+alphanumeric ownership proof or sig-core signature")
 }
 
 // QueryProtocolContact GET /api/contact/protocol?a=&b=

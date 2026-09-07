@@ -37,6 +37,34 @@ func TestCooldownStoreRecordAndRemaining(t *testing.T) {
 	}
 }
 
+func TestCooldownStoreTryClaimAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cooldown.json")
+	store, err := NewCooldownStore(path, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	wait, err := store.TryClaim("PxAlice", now)
+	if err != nil || wait != 0 {
+		t.Fatalf("first claim: wait=%v err=%v", wait, err)
+	}
+	wait, err = store.TryClaim("PxAlice", now.Add(30*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wait != 30*time.Minute {
+		t.Fatalf("expected 30m cooldown, got %v", wait)
+	}
+	if err := store.ReleaseClaim("PxAlice"); err != nil {
+		t.Fatal(err)
+	}
+	wait, err = store.TryClaim("PxAlice", now.Add(31*time.Minute))
+	if err != nil || wait != 0 {
+		t.Fatalf("after release: wait=%v err=%v", wait, err)
+	}
+}
+
 func TestFormatWait(t *testing.T) {
 	h, m, s, label := FormatWait(2*time.Hour + 3*time.Minute + 5*time.Second)
 	if h != 2 || m != 3 || s != 5 {
