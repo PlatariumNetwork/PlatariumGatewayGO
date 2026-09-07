@@ -1,5 +1,7 @@
 # PlatariumGateway (Go Version)
 
+**Release:** v1.1.0.16
+
 Gateway for blockchain integration via REST API and WebSocket in the Platarium network. 
 Full implementation in Go with P2P synchronization support between nodes.
 
@@ -312,7 +314,7 @@ Health check and basic node information.
 **Response:**
 ```json
 {
- "message": "PlatariumGateway v1.0.0 is running (Go)",
+ "message": "PlatariumGateway v1.1.0.16 is running (Go)",
  "nodeId": "072bd62f-7473-446f-a490-73dabd70b66a",
  "nodeAddress": "ws://192.168.0.134:1813",
  "connectedPeers": 3

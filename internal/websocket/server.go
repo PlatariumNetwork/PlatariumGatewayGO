@@ -1,5 +1,7 @@
 package websocket
 
+// Realtime WebSocket gateway for PlatariumGateway (current release: v1.1.0.16).
+
 import (
 	"fmt"
 	"log"
@@ -47,6 +49,8 @@ type Server struct {
 	server         *http.Server
 	messageHandler func(map[string]interface{}) // Handler for incoming peer messages
 	contactEconomy *contacteconomy.Store
+	// proveOwnership verifies wallet control for sensitive WS protocol actions.
+	proveOwnership func(address, signature, mnemonic, alphanumeric, pubMain string) error
 	// Sliding window of group_protocol sends (sender → unix timestamps).
 	groupProtocolHits map[string][]int64
 }
@@ -75,11 +79,11 @@ type OfflineMessage struct {
 // NewServer creates a new WebSocket server
 func NewServer(port int, bc *blockchain.Blockchain, nm *nodes.NodesManager) *Server {
 	s := &Server{
-		port:         port,
-		blockchain:   bc,
-		nodesManager: nm,
-		clients:         make(map[string]*Client),
-		clientsByAddr:   make(map[string]map[string]*Client),
+		port:              port,
+		blockchain:        bc,
+		nodesManager:      nm,
+		clients:           make(map[string]*Client),
+		clientsByAddr:     make(map[string]map[string]*Client),
 		offlineMessages:   make(map[string][]OfflineMessage),
 		e2eePubKeys:       make(map[string]string),
 		groupProtocolHits: make(map[string][]int64),
@@ -87,7 +91,7 @@ func NewServer(port int, bc *blockchain.Blockchain, nm *nodes.NodesManager) *Ser
 
 	// Set local sockets getter
 	nm.SetLocalSocketsGetter(s.GetConnectedSockets)
-	
+
 	// Set message handler for peer messages
 	nm.SetWSMessageHandler(s.HandleIncomingPeerMessage)
 
@@ -98,6 +102,13 @@ func NewServer(port int, bc *blockchain.Blockchain, nm *nodes.NodesManager) *Ser
 func (s *Server) SetContactEconomy(store *contacteconomy.Store) {
 	s.mu.Lock()
 	s.contactEconomy = store
+	s.mu.Unlock()
+}
+
+// SetOwnershipProver attaches a Gateway ownership check for WS pricing / protocol writes.
+func (s *Server) SetOwnershipProver(fn func(address, signature, mnemonic, alphanumeric, pubMain string) error) {
+	s.mu.Lock()
+	s.proveOwnership = fn
 	s.mu.Unlock()
 }
 
@@ -382,9 +393,9 @@ func (s *Server) GetConnectedSockets() []*nodes.SocketInfo {
 }
 
 const (
-	offlineMessageTTLSeconds        = 86400 // 24h retention on gateway
-	offlineMessageMaxPerRecipient   = 500
-	offlineMessageJanitorInterval   = 30 * time.Minute
+	offlineMessageTTLSeconds      = 86400 // 24h retention on gateway
+	offlineMessageMaxPerRecipient = 500
+	offlineMessageJanitorInterval = 30 * time.Minute
 )
 
 func (s *Server) runOfflineMessageJanitor() {
@@ -425,4 +436,3 @@ func offlineMessageAgeOK(m OfflineMessage, now int64) bool {
 	}
 	return now-ba <= offlineMessageTTLSeconds
 }
-

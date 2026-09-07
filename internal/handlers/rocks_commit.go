@@ -68,6 +68,11 @@ func (h *Handler) commitBlockToRocks(block blockchain.BlockRecord, txs []*blockc
 				Balance:     q.Balance,
 				UplpBalance: q.UplpBalance,
 				Nonce:       q.Nonce,
+				Tokens:      q.Tokens,
+				Xp:          q.Xp,
+			}
+			if acct.Xp == "" && len(acct.Tokens) > 0 {
+				acct.Xp = blockchain.TokenXPFromMap(acct.Tokens)
 			}
 		} else {
 			found, ra, err := rocks.RocksGetAccount(addr)

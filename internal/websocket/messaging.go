@@ -752,6 +752,7 @@ func (s *Server) handleContactRespondWS(client *Client, data map[string]interfac
 func (s *Server) handleContactPricingAnnounce(client *Client, data map[string]interface{}) {
 	s.mu.RLock()
 	ce := s.contactEconomy
+	prove := s.proveOwnership
 	s.mu.RUnlock()
 	if ce == nil {
 		return
@@ -767,11 +768,18 @@ func (s *Server) handleContactPricingAnnounce(client *Client, data map[string]in
 	sig := strField(data, "signature")
 	mnemonic := strField(data, "mnemonic")
 	alphanumeric := strField(data, "alphanumeric")
-	// R2-M5: WS already binds Address to the socket identity; still require ownership proof.
-	if mnemonic == "" && alphanumeric == "" && !strings.HasPrefix(sig, "sig-core:") && !strings.HasPrefix(sig, "owned:") {
+	pubMain := strField(data, "pubMain")
+	if prove == nil {
 		_ = client.Conn.WriteJSON(map[string]interface{}{
 			"type": "contactPricingError",
-			"data": map[string]interface{}{"error": "ownership proof required (mnemonic+alphanumeric or sig-core)"},
+			"data": map[string]interface{}{"error": "ownership prover unavailable"},
+		})
+		return
+	}
+	if err := prove(addr, sig, mnemonic, alphanumeric, pubMain); err != nil {
+		_ = client.Conn.WriteJSON(map[string]interface{}{
+			"type": "contactPricingError",
+			"data": map[string]interface{}{"error": err.Error()},
 		})
 		return
 	}

@@ -916,13 +916,13 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 	}
 	bc.blockHistory = append(bc.blockHistory, block)
 	if err := bc.persistChain(); err != nil {
-		// Roll Core back; explorer tip is inconsistent until Undo is called by handler,
-		// but persist failure should also restore Core immediately.
+		// Roll Core back and undo explorer mutations (#28) — do not leave tip applied.
 		if statePath != "" && backupPath != "" {
 			_ = copyFile(backupPath, statePath)
 		}
 		os.Remove(backupPath)
-		return moved, block, "", err
+		bc.undoExplorerConfirmLocked(block, moved, "pending")
+		return nil, BlockRecord{}, "", err
 	}
 	return moved, block, backupPath, nil
 }
@@ -931,6 +931,58 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 func DiscardStateBackup(backupPath string) {
 	if backupPath != "" {
 		_ = os.Remove(backupPath)
+	}
+}
+
+func removeTxFromAddressIndex(list []*Transaction, hash string) []*Transaction {
+	if len(list) == 0 || hash == "" {
+		return list
+	}
+	out := list[:0]
+	for _, tx := range list {
+		if tx == nil || tx.Hash == hash {
+			continue
+		}
+		out = append(out, tx)
+	}
+	return out
+}
+
+// undoExplorerConfirmLocked reverses in-memory confirm side effects. Caller holds bc.mu.
+// requeue is "pending" (L2) or "mempool" (legacy confirm).
+func (bc *Blockchain) undoExplorerConfirmLocked(block BlockRecord, moved []*Transaction, requeue string) {
+	if n := len(bc.blockHistory); n > 0 && bc.blockHistory[n-1].BlockNumber == block.BlockNumber {
+		bc.blockHistory = bc.blockHistory[:n-1]
+		if bc.blockCounter == block.BlockNumber+1 {
+			bc.blockCounter = block.BlockNumber
+		}
+	}
+	bc.totalFeesCollected -= block.TotalFees
+	if bc.totalFeesCollected < 0 {
+		bc.totalFeesCollected = 0
+	}
+	for _, tx := range moved {
+		if tx == nil {
+			continue
+		}
+		delete(bc.transactions, tx.Hash)
+		delete(bc.confirmedHashes, tx.Hash)
+		if bc.lastTx != nil && bc.lastTx.Hash == tx.Hash {
+			bc.lastTx = nil
+		}
+		if tx.From != "" {
+			bc.addressTxs[tx.From] = removeTxFromAddressIndex(bc.addressTxs[tx.From], tx.Hash)
+		}
+		if tx.To != "" {
+			bc.addressTxs[tx.To] = removeTxFromAddressIndex(bc.addressTxs[tx.To], tx.Hash)
+		}
+		tx.BlockNumber = 0
+		switch requeue {
+		case "mempool":
+			bc.mempool = append(bc.mempool, tx)
+		default:
+			bc.pendingBlock = append(bc.pendingBlock, tx)
+		}
 	}
 }
 
@@ -951,25 +1003,7 @@ func (bc *Blockchain) UndoLastConfirmedBlock(block BlockRecord, moved []*Transac
 	if backupPath != "" {
 		_ = os.Remove(backupPath)
 	}
-	if n := len(bc.blockHistory); n > 0 && bc.blockHistory[n-1].BlockNumber == block.BlockNumber {
-		bc.blockHistory = bc.blockHistory[:n-1]
-		if bc.blockCounter == block.BlockNumber+1 {
-			bc.blockCounter = block.BlockNumber
-		}
-	}
-	bc.totalFeesCollected -= block.TotalFees
-	if bc.totalFeesCollected < 0 {
-		bc.totalFeesCollected = 0
-	}
-	for _, tx := range moved {
-		if tx == nil {
-			continue
-		}
-		delete(bc.transactions, tx.Hash)
-		delete(bc.confirmedHashes, tx.Hash)
-		tx.BlockNumber = 0
-		bc.pendingBlock = append(bc.pendingBlock, tx)
-	}
+	bc.undoExplorerConfirmLocked(block, moved, "pending")
 	return bc.persistChain()
 }
 
@@ -1027,7 +1061,8 @@ func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block Block
 			_ = copyFile(backupPath, bc.ledger.StateFilePath())
 		}
 		os.Remove(backupPath)
-		return moved, block, "", err
+		bc.undoExplorerConfirmLocked(block, moved, "mempool")
+		return nil, BlockRecord{}, "", err
 	}
 	return moved, block, backupPath, nil
 }

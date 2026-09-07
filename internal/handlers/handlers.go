@@ -1043,7 +1043,7 @@ func (h *Handler) acceptPeerVote(blockId, nodeId string, yes bool, pubKey, signa
 
 func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
-		"message":        "PlatariumGateway v1.0.0 is running (Go)",
+		"message":        "PlatariumGateway v1.1.0.16 is running (Go)",
 		"nodeId":         h.nodesManager.GetNodeID(),
 		"nodeAddress":    h.nodesManager.GetNodeAddress(),
 		"connectedPeers": len(h.nodesManager.GetConnectedNodes()),

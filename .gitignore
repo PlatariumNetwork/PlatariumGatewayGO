@@ -18,6 +18,12 @@ vendor/
 # Go workspace file
 go.work
 
+# Local node runtime (never publish)
+node0/
+node1/
+data/
+*.l2bak
+
 # IDE
 .idea/
 .vscode/

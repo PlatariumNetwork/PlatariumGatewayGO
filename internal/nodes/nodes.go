@@ -1,5 +1,7 @@
 package nodes
 
+// P2P peer management for PlatariumGateway (current release: v1.1.0.16).
+
 import (
 	"crypto/tls"
 	"encoding/json"
@@ -39,18 +41,18 @@ type SocketInfo struct {
 
 // NodesManager manages peer node connections
 type NodesManager struct {
-	nodeID        string
-	nodeHost      string
-	nodePort      int
-	nodeAddress   string
-	restBaseURL   string // e.g. http://localhost:2812 - sent in announce so peers can forward L1/L2 to us
+	nodeID      string
+	nodeHost    string
+	nodePort    int
+	nodeAddress string
+	restBaseURL string // e.g. http://localhost:2812 - sent in announce so peers can forward L1/L2 to us
 
 	connectedNodes      map[string]*PeerConnection
 	peerSocketsRegistry map[string]map[string]*SocketInfo
 	reconnectTimers     map[string]*time.Timer
 	getLocalSockets     func() []*SocketInfo
 	wsMessageHandler    func(map[string]interface{}) // Handler for WebSocket messages from peers
-	seenEvents          map[string]time.Time // For duplicate detection
+	seenEvents          map[string]time.Time         // For duplicate detection
 	eventMutex          sync.RWMutex
 
 	// L1/L2 vote callbacks (called before re-broadcast so handler can collect votes / respond with vote)
@@ -58,20 +60,20 @@ type NodesManager struct {
 	l1VoteCB           func(blockId, nodeId string, yes bool, pubKey, signature string)
 	l2ProposalCB       func(blockId, proposerNodeId string, txHashes []string)
 	l2VoteCB           func(blockId, nodeId string, yes bool, pubKey, signature string)
-	l1BlockCollectedCB  func(l1BeneficiaryNodeId string) // who gets L1 reward when L2 confirms
-	pendingBlockSyncCB  func(pendingBlock []map[string]interface{}) // sync pending block so any node can run L2
-	mempoolAddCB        func(txMap map[string]interface{})           // add TX to local mempool (sync from peer)
-	dagVertexCB         func(vertex map[string]interface{})          // ingest Narwhal DAG vertex from peer
-	dagCommitCB         func(data map[string]interface{})            // cache DAG commit digests from peer
-	l1VoteResultCB      func(votes map[string]bool, accepted bool)
-	l2VoteResultCB      func(votes map[string]bool, accepted bool)
-	feeDistributionCB   func(data map[string]interface{})
-	blockConfirmedCB    func(data map[string]interface{})
-	nodeLoadCB          func(nodeId string, currentTasks, maxCapacity int64) // sync load from peer for committee size
-	chainHeadCB         func() int64
-	syncRespondCB       func(fromBlock int64) map[string]interface{}
-	syncApplyCB         func(data map[string]interface{})
-	voteCBMu            sync.RWMutex
+	l1BlockCollectedCB func(l1BeneficiaryNodeId string)            // who gets L1 reward when L2 confirms
+	pendingBlockSyncCB func(pendingBlock []map[string]interface{}) // sync pending block so any node can run L2
+	mempoolAddCB       func(txMap map[string]interface{})          // add TX to local mempool (sync from peer)
+	dagVertexCB        func(vertex map[string]interface{})         // ingest Narwhal DAG vertex from peer
+	dagCommitCB        func(data map[string]interface{})           // cache DAG commit digests from peer
+	l1VoteResultCB     func(votes map[string]bool, accepted bool)
+	l2VoteResultCB     func(votes map[string]bool, accepted bool)
+	feeDistributionCB  func(data map[string]interface{})
+	blockConfirmedCB   func(data map[string]interface{})
+	nodeLoadCB         func(nodeId string, currentTasks, maxCapacity int64) // sync load from peer for committee size
+	chainHeadCB        func() int64
+	syncRespondCB      func(fromBlock int64) map[string]interface{}
+	syncApplyCB        func(data map[string]interface{})
+	voteCBMu           sync.RWMutex
 
 	knownPeerAddrs map[string]struct{}
 	peerTLSConfig  *tls.Config
@@ -84,7 +86,7 @@ type NodesManager struct {
 type Event struct {
 	Type      string      `json:"type"`
 	Data      interface{} `json:"data"`
-	Timestamp int64      `json:"timestamp"`
+	Timestamp int64       `json:"timestamp"`
 	OriginID  string      `json:"originId"`
 	EventID   string      `json:"eventId"` // For duplicate detection
 }
@@ -427,19 +429,19 @@ func (nm *NodesManager) GetPeersWithPing() []PeerWithPing {
 	nm.mu.RUnlock()
 
 	peers := make([]PeerWithPing, 0, len(peersList))
-	
+
 	// Use a channel to collect ping results concurrently
 	type pingResult struct {
 		index int
 		ping  *int64
 	}
 	pingChan := make(chan pingResult, len(peersList))
-	
+
 	// Measure ping for each peer concurrently
 	for i, peer := range peersList {
 		go func(idx int, p *PeerConnection) {
 			var ping *int64
-			
+
 			if p.Conn != nil {
 				// Try to measure actual ping by making HTTP request
 				httpAddr := p.Address
@@ -448,11 +450,11 @@ func (nm *NodesManager) GetPeersWithPing() []PeerWithPing {
 				} else if strings.HasPrefix(httpAddr, "wss://") {
 					httpAddr = "https://" + httpAddr[6:]
 				}
-				
+
 				client := &http.Client{
 					Timeout: 3 * time.Second,
 				}
-				
+
 				start := time.Now()
 				resp, err := client.Get(httpAddr + "/api")
 				if err == nil && resp != nil {
@@ -461,15 +463,15 @@ func (nm *NodesManager) GetPeersWithPing() []PeerWithPing {
 					ping = &pingMs
 				}
 			}
-			
+
 			pingChan <- pingResult{index: idx, ping: ping}
 		}(i, peer)
 	}
-	
+
 	// Collect results with timeout
 	results := make(map[int]*int64)
 	timeout := time.After(2 * time.Second)
-	
+
 	for i := 0; i < len(peersList); i++ {
 		select {
 		case result := <-pingChan:
@@ -478,7 +480,7 @@ func (nm *NodesManager) GetPeersWithPing() []PeerWithPing {
 			break
 		}
 	}
-	
+
 	// Build final list with ping results
 	for i, peer := range peersList {
 		ping := results[i]
@@ -490,7 +492,7 @@ func (nm *NodesManager) GetPeersWithPing() []PeerWithPing {
 			Ping:    ping,
 		})
 	}
-	
+
 	return peers
 }
 
@@ -1281,9 +1283,9 @@ func (nm *NodesManager) AnnounceClientConnected(clientID, ip, connectedAt string
 	announcement := map[string]interface{}{
 		"type": "client:connected",
 		"data": map[string]interface{}{
-			"nodeId":     nm.nodeID,
-			"clientId":   clientID,
-			"ip":         ip,
+			"nodeId":      nm.nodeID,
+			"clientId":    clientID,
+			"ip":          ip,
 			"connectedAt": connectedAt,
 		},
 	}
@@ -1402,10 +1404,10 @@ func (nm *NodesManager) handleSyncRequest(conn *websocket.Conn, request map[stri
 		payload = nm.syncRespondCB(fromBlock)
 	} else {
 		payload = map[string]interface{}{
-			"nodeId":     nm.nodeID,
-			"timestamp":  time.Now().Unix(),
+			"nodeId":          nm.nodeID,
+			"timestamp":       time.Now().Unix(),
 			"headBlockNumber": int64(-1),
-			"blocks":     []interface{}{},
+			"blocks":          []interface{}{},
 		}
 	}
 	nm.voteCBMu.RUnlock()
@@ -1472,12 +1474,12 @@ func (nm *NodesManager) GetMetrics() map[string]interface{} {
 		peerAddress := peer.Address
 		peerNodeID := peer.NodeID
 		peer.mu.Unlock()
-		
+
 		peers = append(peers, map[string]interface{}{
 			"nodeId":       peerNodeID,
-			"address":     peerAddress,
+			"address":      peerAddress,
 			"pingFailures": pingFailures,
-			"lastPong":    lastPing,
+			"lastPong":     lastPing,
 		})
 	}
 
@@ -1509,4 +1511,3 @@ func parsePayloadStringSlice(payload map[string]interface{}, key string) []strin
 	}
 	return out
 }
-

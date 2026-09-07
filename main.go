@@ -133,7 +133,7 @@ func main() {
 		_ = os.Setenv("PLATARIUM_DAG_ALLOW_UNSIGNED", "1")
 	}
 	core.EnsureCoreRPCAuthEnv()
-	log.Printf("Starting Platarium Gateway on REST:%d, WS:%d", *portREST, *portWS)
+	log.Printf("Starting Platarium Gateway v1.1.0.16 on REST:%d, WS:%d", *portREST, *portWS)
 
 	// Initialize blockchain
 	bc := blockchain.NewBlockchain()

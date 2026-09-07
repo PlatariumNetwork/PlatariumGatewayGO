@@ -30,6 +30,10 @@ func ensureContactEconomy(h *Handler) {
 	h.contactEconomy = store
 	if h.wsServer != nil {
 		h.wsServer.SetContactEconomy(store)
+		h.wsServer.SetOwnershipProver(func(address, signature, mnemonic, alphanumeric, pubMain string) error {
+			_, err := h.verifyContactPricingOwnership(address, signature, mnemonic, alphanumeric, pubMain)
+			return err
+		})
 	}
 	log.Printf("[INFO] Contact economy ready (enabled=%v gateDMs=%v)", cfg.Enabled, cfg.EconomyGateDMs)
 	go h.runContactTimeoutSweeper()
@@ -120,6 +124,9 @@ func (h *Handler) verifyContactPricingOwnership(address, signature, mnemonic, al
 			return "", fmt.Errorf("mnemonic does not match address")
 		}
 		return "owned:" + pk, nil
+	}
+	if strings.HasPrefix(signature, "owned:") {
+		return "", fmt.Errorf("owned: proof must be produced by Gateway after mnemonic verification")
 	}
 	if strings.HasPrefix(signature, "sig-core:") && h.rustCore != nil {
 		sigHex := strings.TrimPrefix(signature, "sig-core:")
@@ -340,10 +347,11 @@ func (h *Handler) verifyContactRespondOwnership(
 		if !strings.EqualFold(pk, actor) {
 			return "", fmt.Errorf("mnemonic does not match actor address")
 		}
+		// Gateway-minted marker only — never trust client-supplied owned:.
 		return "owned:" + pk, nil
 	}
 	if strings.HasPrefix(signature, "owned:") {
-		return signature, nil
+		return "", fmt.Errorf("owned: proof must be produced by Gateway after mnemonic verification")
 	}
 	if strings.HasPrefix(signature, "sig-core:") && h.rustCore != nil {
 		sigHex := strings.TrimPrefix(signature, "sig-core:")
