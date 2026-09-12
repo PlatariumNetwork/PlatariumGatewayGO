@@ -385,6 +385,7 @@ func (nm *NodesManager) SetSyncApplyCallback(fn func(data map[string]interface{}
 func NewTestNodesManager(peerIDs ...string) *NodesManager {
 	nm := &NodesManager{
 		connectedNodes: make(map[string]*PeerConnection, len(peerIDs)),
+		seenEvents:     make(map[string]time.Time),
 	}
 	for _, id := range peerIDs {
 		nm.connectedNodes[id] = &PeerConnection{NodeID: id}

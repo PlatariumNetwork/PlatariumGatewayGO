@@ -41,6 +41,7 @@ func TestRequestLifecycleAccept(t *testing.T) {
 	if req.RequestIDHash == "" || req.Status != StatusPending {
 		t.Fatalf("bad request: %+v", req)
 	}
+		// Store accepts Gateway-minted owned: markers; production mint is protocol.MintOwnedProof only.
 	_, err = store.Respond("req-1", b, OutcomeAccepted, "owned:"+b)
 	if err != nil {
 		t.Fatal(err)

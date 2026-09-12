@@ -57,14 +57,24 @@ type Server struct {
 
 // Client represents a WebSocket client connection
 type Client struct {
-	ID          string
-	Conn        *websocket.Conn
-	IPAddress   string
-	ConnectedAt time.Time
-	Address     string // Wallet address (Platarium address like Px...)
-	DeviceID    string // Stable per-browser device id (from client)
-	DeviceLabel string // User-visible label (e.g. "MacBook")
-	mu          sync.Mutex
+	ID            string
+	Conn          *websocket.Conn
+	IPAddress     string
+	ConnectedAt   time.Time
+	Address       string // Wallet address (claimed and/or authenticated)
+	Authenticated bool   // true only after register ownership proof succeeded
+	DeviceID      string // Stable per-browser device id (from client)
+	DeviceLabel   string // User-visible label (e.g. "MacBook")
+	mu            sync.Mutex
+}
+
+// AuthenticatedOwner returns the bound address only when the session proved ownership.
+// Claimed-only Address is not treated as proof.
+func (c *Client) AuthenticatedOwner() string {
+	if c == nil || !c.Authenticated {
+		return ""
+	}
+	return c.Address
 }
 
 // OfflineMessage represents a message stored while recipient is offline

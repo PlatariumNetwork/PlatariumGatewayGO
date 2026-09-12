@@ -78,10 +78,8 @@ func (h *Handler) validateTxsForL1(txs []*blockchain.Transaction) l1ValidateOutc
 	}
 	ledger := h.blockchain.Ledger()
 	if ledger == nil {
-		if h.testnet {
-			return l1ValidateOutcome{Err: fmt.Errorf("core ledger unavailable")}
-		}
-		return l1ValidateOutcome{OK: true, ValidTxs: txs}
+		// Fail-closed: never OK when Core ledger is unavailable (testnet or production).
+		return l1ValidateOutcome{Err: fmt.Errorf("core ledger unavailable")}
 	}
 	txsJSON, ok := txsToCoreJSONArray(txs)
 	if !ok {
@@ -445,17 +443,17 @@ func allowDegradedConsensus() bool {
 
 // finalizeVoteRoundWithCore uses Core vote aggregation when available.
 // timeoutPending is the local threshold result before Core aggregation — it is NOT an accept.
-// When Core is unavailable, timeoutPending is returned as the provisional outcome (not "accepted").
-// timeoutRejected is simply timeoutPending == false.
+// When Core is unavailable (nil), timeoutPending is returned as the provisional outcome.
+// On Core process-votes failure (error or nil result), always reject — never fall back to
+// the old timeoutAccepted accept-on-error behavior. Uncertainty never increases authority.
 func (h *Handler) finalizeVoteRoundWithCore(votes map[string]bool, isL1 bool, timeoutPending bool) (accepted bool, toPenalize []string) {
-	// Provisional only: Core Confirmed is authoritative when process-votes succeeds.
-	accepted = timeoutPending
 	if h.rustCore == nil || len(votes) == 0 {
-		return accepted, nil
+		return timeoutPending, nil
 	}
 	votesJSON, err := votesToCoreJSON(votes)
 	if err != nil {
-		return accepted, nil
+		logger.Warn("Core process-votes: votes JSON failed, rejecting: %v", err)
+		return false, nil
 	}
 	var res *core.VoteResult
 	if isL1 {
@@ -464,8 +462,8 @@ func (h *Handler) finalizeVoteRoundWithCore(votes map[string]bool, isL1 bool, ti
 		res, err = h.rustCore.L2ProcessVotes(votesJSON)
 	}
 	if err != nil || res == nil {
-		logger.Warn("Core process-votes failed, using timeout pending/rejected result: %v", err)
-		return accepted, nil
+		logger.Warn("Core process-votes failed, rejecting (no timeoutAccepted fallback): %v", err)
+		return false, nil
 	}
 	return res.Confirmed, res.ToPenalize
 }

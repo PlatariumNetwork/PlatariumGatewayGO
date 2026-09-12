@@ -1,10 +1,15 @@
 package handlers
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"platarium-gateway-go/internal/nodes"
+	"platarium-gateway-go/internal/rating"
 
 	"github.com/gorilla/mux"
 )
@@ -54,4 +59,142 @@ func TestLabRoutesRegisteredWhenEnabled(t *testing.T) {
 	if !found["/api/test-set-load"] || !found["/api/reward-credit-l1"] {
 		t.Fatalf("lab routes missing when enabled: %v", found)
 	}
+}
+
+func TestLabAuthMatrixTestSetLoad(t *testing.T) {
+	path := "/api/test-set-load"
+	t.Run("lab_off_404", func(t *testing.T) {
+		t.Setenv("ENABLE_LAB_ENDPOINTS", "")
+		r := mux.NewRouter()
+		RegisterLabRoutes(r, labTestHandler())
+		rr := postLab(r, path, nil, "")
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("want 404 got %d", rr.Code)
+		}
+	})
+	t.Run("lab_on_no_token_401", func(t *testing.T) {
+		t.Setenv("ENABLE_LAB_ENDPOINTS", "1")
+		t.Setenv("PLATARIUM_LAB_TOKEN", "lab-secret")
+		r := mux.NewRouter()
+		RegisterLabRoutes(r, labTestHandler())
+		rr := postLab(r, path, map[string]interface{}{"currentTasks": 1, "maxCapacity": 10}, "")
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("want 401 got %d", rr.Code)
+		}
+	})
+	t.Run("lab_on_empty_env_token_401", func(t *testing.T) {
+		t.Setenv("ENABLE_LAB_ENDPOINTS", "1")
+		t.Setenv("PLATARIUM_LAB_TOKEN", "")
+		r := mux.NewRouter()
+		RegisterLabRoutes(r, labTestHandler())
+		rr := postLab(r, path, map[string]interface{}{"currentTasks": 1, "maxCapacity": 10}, "anything")
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("want 401 got %d", rr.Code)
+		}
+	})
+	t.Run("lab_on_invalid_token_403", func(t *testing.T) {
+		t.Setenv("ENABLE_LAB_ENDPOINTS", "1")
+		t.Setenv("PLATARIUM_LAB_TOKEN", "lab-secret")
+		r := mux.NewRouter()
+		RegisterLabRoutes(r, labTestHandler())
+		rr := postLab(r, path, map[string]interface{}{"currentTasks": 1, "maxCapacity": 10}, "wrong")
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("want 403 got %d", rr.Code)
+		}
+	})
+	t.Run("lab_on_valid_token_ok", func(t *testing.T) {
+		t.Setenv("ENABLE_LAB_ENDPOINTS", "1")
+		t.Setenv("PLATARIUM_LAB_TOKEN", "lab-secret")
+		r := mux.NewRouter()
+		RegisterLabRoutes(r, labTestHandler())
+		rr := postLab(r, path, map[string]interface{}{"currentTasks": 2, "maxCapacity": 10}, "lab-secret")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("want 200 got %d body=%s", rr.Code, rr.Body.String())
+		}
+	})
+}
+
+func TestLabAuthMatrixRewardCreditL1(t *testing.T) {
+	path := "/api/reward-credit-l1"
+	t.Run("lab_off_404", func(t *testing.T) {
+		t.Setenv("ENABLE_LAB_ENDPOINTS", "0")
+		h := labTestHandler()
+		h.nodeEarnedL1 = 42
+		r := mux.NewRouter()
+		RegisterLabRoutes(r, h)
+		rr := postLab(r, path, map[string]interface{}{"amount": 7}, "")
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("want 404 got %d", rr.Code)
+		}
+		if h.nodeEarnedL1 != 42 {
+			t.Fatalf("nodeEarnedL1 changed without route: %d", h.nodeEarnedL1)
+		}
+	})
+	t.Run("lab_on_no_token_unchanged", func(t *testing.T) {
+		t.Setenv("ENABLE_LAB_ENDPOINTS", "1")
+		t.Setenv("PLATARIUM_LAB_TOKEN", "lab-secret")
+		h := labTestHandler()
+		h.nodeEarnedL1 = 100
+		r := mux.NewRouter()
+		RegisterLabRoutes(r, h)
+		rr := postLab(r, path, map[string]interface{}{"amount": 5}, "")
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("want 401 got %d", rr.Code)
+		}
+		if h.nodeEarnedL1 != 100 {
+			t.Fatalf("nodeEarnedL1 mutated without auth: %d", h.nodeEarnedL1)
+		}
+	})
+	t.Run("lab_on_invalid_token_unchanged", func(t *testing.T) {
+		t.Setenv("ENABLE_LAB_ENDPOINTS", "1")
+		t.Setenv("PLATARIUM_LAB_TOKEN", "lab-secret")
+		h := labTestHandler()
+		h.nodeEarnedL1 = 100
+		r := mux.NewRouter()
+		RegisterLabRoutes(r, h)
+		rr := postLab(r, path, map[string]interface{}{"amount": 5}, "nope")
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("want 403 got %d", rr.Code)
+		}
+		if h.nodeEarnedL1 != 100 {
+			t.Fatalf("nodeEarnedL1 mutated on 403: %d", h.nodeEarnedL1)
+		}
+	})
+	t.Run("lab_on_valid_token_ok", func(t *testing.T) {
+		t.Setenv("ENABLE_LAB_ENDPOINTS", "1")
+		t.Setenv("PLATARIUM_LAB_TOKEN", "lab-secret")
+		h := labTestHandler()
+		h.nodeEarnedL1 = 10
+		r := mux.NewRouter()
+		RegisterLabRoutes(r, h)
+		rr := postLab(r, path, map[string]interface{}{"amount": 5}, "lab-secret")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("want 200 got %d body=%s", rr.Code, rr.Body.String())
+		}
+		if h.nodeEarnedL1 != 15 {
+			t.Fatalf("nodeEarnedL1=%d want 15", h.nodeEarnedL1)
+		}
+	})
+}
+
+func labTestHandler() *Handler {
+	nm := nodes.NewTestNodesManager()
+	return &Handler{
+		nodesManager: nm,
+		nodeRegistry: rating.NewRegistry(),
+	}
+}
+
+func postLab(r *mux.Router, path string, body map[string]interface{}, token string) *httptest.ResponseRecorder {
+	var buf bytes.Buffer
+	if body != nil {
+		_ = json.NewEncoder(&buf).Encode(body)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, &buf)
+	if token != "" {
+		req.Header.Set("X-Platarium-Lab-Token", token)
+	}
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	return rr
 }

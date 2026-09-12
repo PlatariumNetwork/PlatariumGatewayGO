@@ -34,3 +34,27 @@ func RejectClientOwnedProof(signature string) error {
 	}
 	return nil
 }
+
+// MintOwnedProof builds the Gateway-only ownership marker owned:<addr>.
+// Call only after ResolveAuthenticatedOwner (or equivalent verify) succeeds —
+// never concatenate "owned:" + address at call sites.
+func MintOwnedProof(verifiedOwner string) (string, error) {
+	verifiedOwner = strings.TrimSpace(verifiedOwner)
+	if verifiedOwner == "" {
+		return "", fmt.Errorf("missing verified owner for mint")
+	}
+	if strings.HasPrefix(verifiedOwner, "owned:") {
+		return "", fmt.Errorf("owned: prefix is not valid mint input")
+	}
+	return "owned:" + verifiedOwner, nil
+}
+
+// MintOwnedProofAfterResolve resolves claimed against authenticated, then mints.
+// This is the only supported path that produces owned: from claim + session proof.
+func MintOwnedProofAfterResolve(claimed, authenticated string) (string, error) {
+	verified, err := ResolveAuthenticatedOwner(claimed, authenticated)
+	if err != nil {
+		return "", err
+	}
+	return MintOwnedProof(verified)
+}

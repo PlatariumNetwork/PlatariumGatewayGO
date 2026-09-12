@@ -1,6 +1,10 @@
 package handlers
 
-import "testing"
+import (
+	"testing"
+
+	"platarium-gateway-go/internal/core"
+)
 
 func TestFinalizeVoteRoundTimeoutPendingNotNamedAccepted(t *testing.T) {
 	h := &Handler{} // rustCore nil → returns provisional timeoutPending / timeoutRejected
@@ -16,5 +20,18 @@ func TestFinalizeVoteRoundTimeoutPendingNotNamedAccepted(t *testing.T) {
 	pass, _ := h.finalizeVoteRoundWithCore(nil, false, true)
 	if !pass {
 		t.Fatal("empty votes + timeoutPending")
+	}
+}
+
+func TestFinalizeVoteRoundCoreErrorRejects(t *testing.T) {
+	// Non-nil Core with empty binary → process-votes Execute fails.
+	h := &Handler{rustCore: &core.RustCore{}}
+	accepted, _ := h.finalizeVoteRoundWithCore(map[string]bool{"n1": true}, true, true)
+	if accepted {
+		t.Fatal("Core process-votes error must not accept (no timeoutAccepted fallback)")
+	}
+	acceptedL2, _ := h.finalizeVoteRoundWithCore(map[string]bool{"n1": true}, false, true)
+	if acceptedL2 {
+		t.Fatal("L2 Core process-votes error must not accept")
 	}
 }

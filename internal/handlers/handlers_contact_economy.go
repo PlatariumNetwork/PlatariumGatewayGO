@@ -123,11 +123,7 @@ func (h *Handler) verifyContactPricingOwnership(address, signature, mnemonic, al
 			return "", fmt.Errorf("GenerateKeys: %w", err)
 		}
 		pk := keys["publicKey"]
-		verified, err := protocol.ResolveAuthenticatedOwner(address, pk)
-		if err != nil {
-			return "", err
-		}
-		return "owned:" + verified, nil
+		return protocol.MintOwnedProofAfterResolve(address, pk)
 	}
 	if strings.HasPrefix(signature, "sig-core:") && h.rustCore != nil {
 		sigHex := strings.TrimPrefix(signature, "sig-core:")
@@ -351,12 +347,8 @@ func (h *Handler) verifyContactRespondOwnership(
 			return "", fmt.Errorf("GenerateKeys: %w", err)
 		}
 		pk := keys["publicKey"]
-		verified, err := protocol.ResolveAuthenticatedOwner(actor, pk)
-		if err != nil {
-			return "", err
-		}
 		// Gateway-minted marker only — never trust client-supplied owned:.
-		return "owned:" + verified, nil
+		return protocol.MintOwnedProofAfterResolve(actor, pk)
 	}
 	if strings.HasPrefix(signature, "sig-core:") && h.rustCore != nil {
 		sigHex := strings.TrimPrefix(signature, "sig-core:")
