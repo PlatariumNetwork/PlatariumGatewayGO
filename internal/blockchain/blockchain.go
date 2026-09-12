@@ -106,6 +106,8 @@ type Blockchain struct {
 	confirmedHashes    map[string]bool // hashes already in a confirmed block (guards re-admission)
 	dagCommitDigests   []string        // last DAG batch-commit order for L2 apply
 	dagCommitAnchor    string
+	// rocksHeadProbe overrides Rocks tip for read-path tip-freeze tests (#57).
+	rocksHeadProbe func() (gatewayHead int64, ok bool)
 }
 
 // NewBlockchain creates a new blockchain instance
@@ -1142,7 +1144,9 @@ func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block Block
 
 // AddConfirmedBlock adds a block received from a peer. Returns false if the block is already known.
 // On same-height different hash: prefer stronger vote score; automatic reorg is not supported (P0 detect).
-func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (bool, error) {
+// backupPath is retained until DurableCommitAfterExplorer succeeds (shared confirm primitive #60);
+// callers must not DiscardStateBackup before Rocks/commit marker success.
+func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (added bool, backupPath string, err error) {
 	bc.mu.Lock()
 	for _, b := range bc.blockHistory {
 		if b.BlockNumber != block.BlockNumber {
@@ -1150,30 +1154,27 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 		}
 		if b.BlockHash != "" && block.BlockHash != "" && b.BlockHash == block.BlockHash {
 			bc.mu.Unlock()
-			return false, nil
+			return false, "", nil
 		}
 		if b.BlockHash == block.BlockHash && block.BlockHash == "" {
 			bc.mu.Unlock()
-			return false, nil
+			return false, "", nil
 		}
 		// Competing block at same height
 		if PreferBlock(b, block) {
 			bc.mu.Unlock()
-			return false, fmt.Errorf("%w at height %d: peer block preferred (L2Yes=%d hash=%s) but reorg unsupported; local keeps %s",
+			return false, "", fmt.Errorf("%w at height %d: peer block preferred (L2Yes=%d hash=%s) but reorg unsupported; local keeps %s",
 				ErrForkConflict, block.BlockNumber, block.L2Yes, shortHash(block.BlockHash), shortHash(b.BlockHash))
 		}
 		bc.mu.Unlock()
-		return false, fmt.Errorf("%w at height %d: keeping local block (L2Yes=%d hash=%s) over peer (L2Yes=%d hash=%s)",
+		return false, "", fmt.Errorf("%w at height %d: keeping local block (L2Yes=%d hash=%s) over peer (L2Yes=%d hash=%s)",
 			ErrForkConflict, block.BlockNumber, b.L2Yes, shortHash(b.BlockHash), block.L2Yes, shortHash(block.BlockHash))
 	}
 	bc.mu.Unlock()
 
-	backupPath, err := bc.applyConfirmedTransactions(txs)
+	backupPath, err = bc.applyConfirmedTransactions(txs)
 	if err != nil {
-		return false, err
-	}
-	if backupPath != "" {
-		os.Remove(backupPath)
+		return false, "", err
 	}
 
 	bc.mu.Lock()
@@ -1184,6 +1185,7 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 	}
 
 	txHashes := make(map[string]bool)
+	moved := make([]*Transaction, 0, len(txs))
 	for _, tx := range txs {
 		if tx == nil {
 			continue
@@ -1200,6 +1202,7 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 		txHashes[tx.Hash] = true
 		bc.confirmedHashes[tx.Hash] = true
 		bc.totalFeesCollected += fee
+		moved = append(moved, tx)
 	}
 	for _, h := range block.TxHashes {
 		if h != "" {
@@ -1223,9 +1226,18 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 
 	bc.blockHistory = append(bc.blockHistory, block)
 	if err := bc.persistChain(); err != nil {
-		return false, err
+		// Shared rollback: restore Core backup + undo explorer; do not leave half tip (#60).
+		if bc.ledger != nil && backupPath != "" {
+			_ = copyFile(backupPath, bc.ledger.StateFilePath())
+		}
+		bc.undoExplorerConfirmLocked(block, moved, "mempool")
+		if backupPath != "" {
+			_ = os.Remove(backupPath)
+		}
+		return false, "", fmt.Errorf("%w: %v", ErrExplorerPersistAfterApply, err)
 	}
-	return true, nil
+	// Backup retained for DurableCommitAfterExplorer (Rocks → commit marker → cleanup).
+	return true, backupPath, nil
 }
 
 func shortHash(h string) string {
@@ -1484,25 +1496,34 @@ func (bc *Blockchain) ApplyBlockHeader(blockNumber int64, header core.BlockHeade
 }
 
 // GetBlockHistory returns block records for analytics (with L1/L2 votes when available).
+// When Rocks is SoT, blocks ahead of Rocks head are frozen out of the served tip (#57).
 func (bc *Blockchain) GetBlockHistory() []BlockRecord {
 	bc.mu.RLock()
+	var out []BlockRecord
 	if len(bc.blockHistory) > 0 {
-		out := make([]BlockRecord, len(bc.blockHistory))
+		out = make([]BlockRecord, len(bc.blockHistory))
 		copy(out, bc.blockHistory)
-		bc.mu.RUnlock()
-		return out
 	}
 	bc.mu.RUnlock()
-	if bc.RocksEnabled() {
+	if len(out) == 0 && bc.RocksEnabled() {
 		if blocks, err := bc.listBlockHistoryFromRocks(); err == nil {
-			return blocks
+			out = blocks
 		}
 	}
-	return nil
+	if rocksHead, ok := bc.headBlockNumberFromRocks(); ok {
+		return FreezeBlockHistory(out, rocksHead, true)
+	}
+	return out
 }
 
 // GetBlockByNumber returns a copy of the block record for the given block number, or nil if not found.
+// When Rocks is SoT, blocks ahead of Rocks head are not served as canonical (#57).
 func (bc *Blockchain) GetBlockByNumber(blockNumber int64) *BlockRecord {
+	if rocksHead, ok := bc.headBlockNumberFromRocks(); ok {
+		if blockNumber > rocksHead {
+			return nil
+		}
+	}
 	bc.mu.RLock()
 	for i := range bc.blockHistory {
 		if bc.blockHistory[i].BlockNumber == blockNumber {
@@ -1536,13 +1557,10 @@ type ChainStats struct {
 // GetStats returns current chain/mempool/pending stats and total fees
 func (bc *Blockchain) GetStats() ChainStats {
 	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-
-	lastNum := int64(0)
-	if bc.blockCounter > 0 {
-		lastNum = bc.blockCounter - 1
-	}
 	chainTxCount := len(bc.transactions)
+	mempoolCount := len(bc.mempool)
+	pendingCount := len(bc.pendingBlock)
+	totalFees := bc.totalFeesCollected
 	if bc.rocks != nil && bc.rocks.Enabled() {
 		canonical := make(map[string]bool)
 		for _, block := range bc.blockHistory {
@@ -1554,11 +1572,17 @@ func (bc *Blockchain) GetStats() ChainStats {
 		}
 		chainTxCount = len(canonical)
 	}
+	bc.mu.RUnlock()
+
+	lastNum := bc.HeadBlockNumber()
+	if lastNum < 0 {
+		lastNum = 0
+	}
 	st := ChainStats{
 		ChainTxCount: chainTxCount,
-		MempoolCount: len(bc.mempool),
-		PendingCount: len(bc.pendingBlock),
-		TotalFees:    bc.totalFeesCollected,
+		MempoolCount: mempoolCount,
+		PendingCount: pendingCount,
+		TotalFees:    totalFees,
 		LastBlockNum: lastNum,
 	}
 	return st

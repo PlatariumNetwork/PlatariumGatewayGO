@@ -273,6 +273,12 @@ func (bc *Blockchain) listBlockHistoryFromRocks() ([]BlockRecord, error) {
 }
 
 func (bc *Blockchain) headBlockNumberFromRocks() (int64, bool) {
+	bc.mu.RLock()
+	probe := bc.rocksHeadProbe
+	bc.mu.RUnlock()
+	if probe != nil {
+		return probe()
+	}
 	rocks := bc.rocksClient()
 	if rocks == nil || !rocks.Enabled() {
 		return -1, false
@@ -282,4 +288,12 @@ func (bc *Blockchain) headBlockNumberFromRocks() (int64, bool) {
 		return -1, false
 	}
 	return core.RocksHeightToGatewayBlock(head), true
+}
+
+// SetRocksHeadProbe installs a fake Rocks gateway head for tip-freeze tests (#57).
+// Pass nil to clear. When set, read paths treat Rocks as SoT using the probe tip.
+func (bc *Blockchain) SetRocksHeadProbe(fn func() (gatewayHead int64, ok bool)) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	bc.rocksHeadProbe = fn
 }

@@ -143,31 +143,8 @@ func (bc *Blockchain) BuildConsistencyDiagnostic() ConsistencyDiagnostic {
 	}
 
 	// --- Compare layers ---
-	if report.Rocks.Present && report.ChainJSON.Present && report.ChainJSON.Height > 0 {
-		if report.Rocks.Height != report.ChainJSON.Height {
-			report.Reasons = append(report.Reasons, fmt.Sprintf(
-				"height_mismatch: rocks=%d chain_json=%d", report.Rocks.Height, report.ChainJSON.Height))
-		}
-		if report.Rocks.BlockHash != "" && report.ChainJSON.BlockHash != "" &&
-			report.Rocks.BlockHash != report.ChainJSON.BlockHash {
-			report.Reasons = append(report.Reasons, fmt.Sprintf(
-				"hash_mismatch: rocks=%s chain_json=%s", report.Rocks.BlockHash, report.ChainJSON.BlockHash))
-		}
-		if report.Rocks.StateRoot != "" && report.ChainJSON.StateRoot != "" &&
-			report.Rocks.StateRoot != report.ChainJSON.StateRoot {
-			report.Reasons = append(report.Reasons, fmt.Sprintf(
-				"state_root_mismatch: rocks=%s chain_json=%s", report.Rocks.StateRoot, report.ChainJSON.StateRoot))
-		}
-	}
-	if report.Rocks.Present && report.StateFile.Present &&
-		report.Rocks.StateRoot != "" && report.StateFile.StateRoot != "" &&
-		report.Rocks.StateRoot != report.StateFile.StateRoot {
-		report.Reasons = append(report.Reasons, fmt.Sprintf(
-			"state_file_vs_rocks_root: state_file=%s rocks=%s", report.StateFile.StateRoot, report.Rocks.StateRoot))
-	}
-	if report.CoreOK != nil && !*report.CoreOK {
-		// already in reasons
-	}
+	reasons := EvaluateLayerConsistency(report.Rocks, report.ChainJSON, report.StateFile, report.CoreOK)
+	report.Reasons = append(report.Reasons, reasons...)
 
 	if len(report.Reasons) > 0 {
 		report.Status = ConsistencyStatusDiverged
@@ -175,4 +152,45 @@ func (bc *Blockchain) BuildConsistencyDiagnostic() ConsistencyDiagnostic {
 		report.Status = ConsistencyStatusConsistent
 	}
 	return report
+}
+
+// EvaluateLayerConsistency compares Rocks / chain.json / state_file tips (#68 fixtures).
+// Returns mismatch reasons; empty means CONSISTENT.
+func EvaluateLayerConsistency(rocks, chainJSON, stateFile LayerTip, coreOK *bool) []string {
+	var reasons []string
+	if rocks.Present && chainJSON.Present && chainJSON.Height > 0 {
+		if rocks.Height != chainJSON.Height {
+			reasons = append(reasons, fmt.Sprintf(
+				"height_mismatch: rocks=%d chain_json=%d", rocks.Height, chainJSON.Height))
+		}
+		if rocks.BlockHash != "" && chainJSON.BlockHash != "" &&
+			rocks.BlockHash != chainJSON.BlockHash {
+			reasons = append(reasons, fmt.Sprintf(
+				"hash_mismatch: rocks=%s chain_json=%s", rocks.BlockHash, chainJSON.BlockHash))
+		}
+		if rocks.StateRoot != "" && chainJSON.StateRoot != "" &&
+			rocks.StateRoot != chainJSON.StateRoot {
+			reasons = append(reasons, fmt.Sprintf(
+				"state_root_mismatch: rocks=%s chain_json=%s", rocks.StateRoot, chainJSON.StateRoot))
+		}
+	}
+	if rocks.Present && stateFile.Present &&
+		rocks.StateRoot != "" && stateFile.StateRoot != "" &&
+		rocks.StateRoot != stateFile.StateRoot {
+		reasons = append(reasons, fmt.Sprintf(
+			"state_file_vs_rocks_root: state_file=%s rocks=%s", stateFile.StateRoot, rocks.StateRoot))
+	}
+	if coreOK != nil && !*coreOK {
+		// Caller already recorded rocks_internal reasons when Core reported !OK.
+		_ = coreOK
+	}
+	return reasons
+}
+
+// StatusFromReasons maps reason list to CONSISTENT | DIVERGED (#68).
+func StatusFromReasons(reasons []string) string {
+	if len(reasons) > 0 {
+		return ConsistencyStatusDiverged
+	}
+	return ConsistencyStatusConsistent
 }

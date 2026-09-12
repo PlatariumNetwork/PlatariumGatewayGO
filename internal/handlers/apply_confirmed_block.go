@@ -5,15 +5,26 @@ import (
 
 	"platarium-gateway-go/internal/blockchain"
 	"platarium-gateway-go/internal/logger"
+	"platarium-gateway-go/internal/metrics"
+)
+
+// ConfirmFailPoint names injectable failure sites on the shared confirm boundary (#59).
+type ConfirmFailPoint string
+
+const (
+	// FailPointNone disables injection.
+	FailPointNone ConfirmFailPoint = ""
+	// FailPointAfterExplorerBeforeRocks injects failure after explorer apply/persist
+	// and header apply, before Rocks commit — between apply and Rocks (#59).
+	FailPointAfterExplorerBeforeRocks ConfirmFailPoint = "after_explorer_before_rocks"
 )
 
 // ConfirmBoundarySteps documents the unified confirm durability boundary (issue #56).
-// Shared L2 / legacy finalize path follows these steps in order:
+// Shared L2 / legacy / peer finalize path follows these steps in order:
 //
 //	prepare → apply explorer → persist → Rocks → commit marker → cleanup backup
 //
 // Backup (.l2bak) must NOT be removed before durable Rocks commit success.
-// This is a bounded prototype: peer AddConfirmedBlock may still use a subset of steps.
 const ConfirmBoundarySteps = "prepare → apply explorer → persist → Rocks → commit marker → cleanup backup"
 
 // ConfirmedBlockFinalizeResult is the outcome of FinalizeConfirmedBlock after explorer persist.
@@ -23,11 +34,53 @@ type ConfirmedBlockFinalizeResult struct {
 	BackupKept     bool // true if backup retained because Rocks/header failed
 }
 
-// FinalizeConfirmedBlock runs the post-explorer durability half of the confirm boundary (#56):
-// assemble header → ApplyBlockHeader (persist) → Rocks commit (commit marker) → cleanup backup.
-//
+// SetConfirmFailPoint installs a mid-confirm failure injection point (tests / #59).
+func (h *Handler) SetConfirmFailPoint(p ConfirmFailPoint) {
+	if h == nil {
+		return
+	}
+	h.confirmFailPoint = p
+}
+
+// DurableCommitAfterExplorer is the shared Rocks → commit marker → cleanup/undo half
+// used by L2, legacy confirm, and peer AddConfirmedBlock (#56/#60).
 // stateBackup must remain on disk until Rocks succeeds; on failure UndoLastConfirmedBlock consumes it.
-// When Rocks is disabled, header success still discards the backup after explorer persist.
+// When Rocks is disabled, success still discards the backup after explorer persist.
+func (h *Handler) DurableCommitAfterExplorer(
+	block blockchain.BlockRecord,
+	moved []*blockchain.Transaction,
+	stateBackup string,
+) (ConfirmedBlockFinalizeResult, error) {
+	out := ConfirmedBlockFinalizeResult{Block: block}
+
+	// Failure injection point (#59): between explorer apply and Rocks (or persist marker).
+	if h != nil && h.confirmFailPoint == FailPointAfterExplorerBeforeRocks {
+		logger.Error("confirm fail-point %s: injecting failure before Rocks", FailPointAfterExplorerBeforeRocks)
+		if undoErr := h.blockchain.UndoLastConfirmedBlock(block, moved, stateBackup); undoErr != nil {
+			logger.Error("fail-point rollback also failed: %v", undoErr)
+		}
+		out.BackupKept = false
+		return out, fmt.Errorf("injected failure at %s: no advanced canonical tip", FailPointAfterExplorerBeforeRocks)
+	}
+
+	if err := h.commitBlockToRocks(out.Block, moved, out.Block.StateRoot); err != nil {
+		metrics.Global.IncRocksCommitErrors()
+		logger.Error("RocksDB commit after confirm FAILED: %v", err)
+		if undoErr := h.blockchain.UndoLastConfirmedBlock(out.Block, moved, stateBackup); undoErr != nil {
+			logger.Error("rocks-fail rollback also failed: %v", undoErr)
+		}
+		out.BackupKept = false
+		return out, fmt.Errorf("rocks commit failed after confirm: %w", err)
+	}
+	out.RocksCommitted = h.blockchain.RocksEnabled()
+	// Commit marker: Rocks head advanced (or Rocks disabled and explorer persisted with header).
+	// Only now is it safe to remove the Core state backup.
+	blockchain.DiscardStateBackup(stateBackup)
+	return out, nil
+}
+
+// FinalizeConfirmedBlock runs the post-explorer durability half of the confirm boundary (#56):
+// assemble header → ApplyBlockHeader (persist) → DurableCommitAfterExplorer (Rocks → cleanup).
 func (h *Handler) FinalizeConfirmedBlock(
 	block blockchain.BlockRecord,
 	moved []*blockchain.Transaction,
@@ -61,17 +114,21 @@ func (h *Handler) FinalizeConfirmedBlock(
 	out.Block.PreviousHash = header.PreviousHash
 	out.Block.ProducerNodeID = producerID
 
-	if err := h.commitBlockToRocks(out.Block, moved, header.StateRoot); err != nil {
-		logger.Error("RocksDB commit after confirm FAILED: %v", err)
-		if undoErr := h.blockchain.UndoLastConfirmedBlock(out.Block, moved, stateBackup); undoErr != nil {
-			logger.Error("rocks-fail rollback also failed: %v", undoErr)
-		}
-		out.BackupKept = false
-		return out, fmt.Errorf("rocks commit failed after confirm: %w", err)
+	return h.DurableCommitAfterExplorer(out.Block, moved, stateBackup)
+}
+
+// ApplyPeerConfirmedBlock routes peer block_confirmed through the shared confirm primitive (#60):
+// AddConfirmedBlock (prepare/apply/persist, backup retained) → DurableCommitAfterExplorer.
+func (h *Handler) ApplyPeerConfirmedBlock(block blockchain.BlockRecord, txs []*blockchain.Transaction) (bool, error) {
+	added, backupPath, err := h.blockchain.AddConfirmedBlock(block, txs)
+	if err != nil {
+		return false, err
 	}
-	out.RocksCommitted = h.blockchain.RocksEnabled()
-	// Commit marker: Rocks head advanced (or Rocks disabled and explorer persisted with header).
-	// Only now is it safe to remove the Core state backup.
-	blockchain.DiscardStateBackup(stateBackup)
-	return out, nil
+	if !added {
+		return false, nil
+	}
+	if _, err := h.DurableCommitAfterExplorer(block, txs, backupPath); err != nil {
+		return false, err
+	}
+	return true, nil
 }

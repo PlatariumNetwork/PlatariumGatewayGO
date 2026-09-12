@@ -57,31 +57,29 @@ func TestBuildConsistencyDiagnosticDivergedFixture(t *testing.T) {
 		t.Fatal("diagnostic_only")
 	}
 
-	d := ConsistencyDiagnostic{
-		DiagnosticOnly: true,
-		Status:         ConsistencyStatusConsistent,
-		Rocks:          LayerTip{Present: true, Height: 2, BlockHash: "bh-rocks", StateRoot: "sr1"},
-		ChainJSON:      LayerTip{Present: true, Height: 1, BlockHash: "bh-chain", StateRoot: "sr2"},
+	// Forced mismatch fixture → DIVERGED (#68).
+	mismatchReasons := EvaluateLayerConsistency(
+		LayerTip{Present: true, Height: 2, BlockHash: "bh-rocks", StateRoot: "sr1"},
+		LayerTip{Present: true, Height: 1, BlockHash: "bh-chain", StateRoot: "sr2"},
+		LayerTip{},
+		nil,
+	)
+	if StatusFromReasons(mismatchReasons) != ConsistencyStatusDiverged {
+		t.Fatalf("expected DIVERGED fixture, reasons=%v", mismatchReasons)
 	}
-	if d.Rocks.Height != d.ChainJSON.Height {
-		d.Status = ConsistencyStatusDiverged
-		d.Reasons = append(d.Reasons, "height_mismatch")
-	}
-	if d.Status != ConsistencyStatusDiverged {
-		t.Fatal("expected DIVERGED fixture")
+	if len(mismatchReasons) == 0 {
+		t.Fatal("forced mismatch must produce reasons")
 	}
 
-	m := ConsistencyDiagnostic{
-		DiagnosticOnly: true,
-		Status:         ConsistencyStatusConsistent,
-		Rocks:          LayerTip{Present: true, Height: 1, BlockHash: "same", StateRoot: "sr"},
-		ChainJSON:      LayerTip{Present: true, Height: 1, BlockHash: "same", StateRoot: "sr"},
-	}
-	if m.Rocks.Height != m.ChainJSON.Height || m.Rocks.BlockHash != m.ChainJSON.BlockHash {
-		m.Status = ConsistencyStatusDiverged
-	}
-	if m.Status != ConsistencyStatusConsistent {
-		t.Fatal("expected CONSISTENT fixture")
+	// Matching fixture → CONSISTENT (#68).
+	matchReasons := EvaluateLayerConsistency(
+		LayerTip{Present: true, Height: 1, BlockHash: "same", StateRoot: "sr"},
+		LayerTip{Present: true, Height: 1, BlockHash: "same", StateRoot: "sr"},
+		LayerTip{},
+		nil,
+	)
+	if StatusFromReasons(matchReasons) != ConsistencyStatusConsistent {
+		t.Fatalf("expected CONSISTENT fixture, reasons=%v", matchReasons)
 	}
 
 	raw, err := os.ReadFile(chainPath)
@@ -94,6 +92,28 @@ func TestBuildConsistencyDiagnosticDivergedFixture(t *testing.T) {
 	}
 	if len(file.Blocks) != 1 {
 		t.Fatalf("blocks=%d", len(file.Blocks))
+	}
+}
+
+func TestConsistencyMismatchAndMatchFixtures(t *testing.T) {
+	// Standalone fixture test for issue #68 acceptance criteria.
+	diverged := EvaluateLayerConsistency(
+		LayerTip{Present: true, Height: 3, BlockHash: "r", StateRoot: "a"},
+		LayerTip{Present: true, Height: 2, BlockHash: "c", StateRoot: "b"},
+		LayerTip{Present: false},
+		nil,
+	)
+	if StatusFromReasons(diverged) != ConsistencyStatusDiverged {
+		t.Fatal("forced mismatch fixture must report DIVERGED")
+	}
+	consistent := EvaluateLayerConsistency(
+		LayerTip{Present: true, Height: 2, BlockHash: "x", StateRoot: "y"},
+		LayerTip{Present: true, Height: 2, BlockHash: "x", StateRoot: "y"},
+		LayerTip{Present: false},
+		nil,
+	)
+	if StatusFromReasons(consistent) != ConsistencyStatusConsistent {
+		t.Fatal("matching fixture must report CONSISTENT")
 	}
 }
 

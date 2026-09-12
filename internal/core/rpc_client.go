@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"platarium-gateway-go/internal/metrics"
 )
 
 // RPCClient talks to platarium-cli serve over newline-delimited JSON-RPC 2.0.
@@ -174,6 +176,7 @@ func (c *RPCClient) Call(method string, params map[string]interface{}) (string, 
 	}
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
+		metrics.Global.IncCoreRPCErrors()
 		return "", err
 	}
 
@@ -182,13 +185,16 @@ func (c *RPCClient) Call(method string, params map[string]interface{}) (string, 
 		// H8: never retry mutating calls after the request bytes were written —
 		// the Core may have applied state before the read timed out.
 		if wrote && isMutatingRPCMethod(method) {
+			metrics.Global.IncCoreRPCErrors()
 			return "", fmt.Errorf("mutating RPC %s: write completed but response failed (refusing retry to avoid double-apply): %w", method, err)
 		}
 		if reconnErr := c.connectLocked(); reconnErr != nil {
+			metrics.Global.IncCoreRPCErrors()
 			return "", err
 		}
 		out, _, err = c.roundTripLocked(reqBytes, reqID)
 		if err != nil {
+			metrics.Global.IncCoreRPCErrors()
 			return "", err
 		}
 	}

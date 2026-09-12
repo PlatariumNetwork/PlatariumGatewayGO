@@ -109,6 +109,9 @@ type Handler struct {
 	operatorRewardedBlock map[uint64]bool
 
 	exploreMetrics *exploreMetrics
+
+	// confirmFailPoint injects mid-confirm failures for #59 tests (empty = off).
+	confirmFailPoint ConfirmFailPoint
 }
 
 type l2VoteRound struct {
@@ -962,7 +965,7 @@ func (h *Handler) onBlockConfirmed(data map[string]interface{}) {
 		}
 	}
 
-	added, err := h.blockchain.AddConfirmedBlock(block, txs)
+	added, err := h.ApplyPeerConfirmedBlock(block, txs)
 	if err != nil {
 		logger.Warn("Block #%d sync apply failed: %v", block.BlockNumber, err)
 		return

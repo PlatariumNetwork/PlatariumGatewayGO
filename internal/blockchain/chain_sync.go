@@ -3,6 +3,7 @@ package blockchain
 import "encoding/json"
 
 // HeadBlockNumber returns the latest confirmed block number, or -1 if empty.
+// When Rocks is SoT, never returns explorer tip ahead of Rocks head (#57).
 func (bc *Blockchain) HeadBlockNumber() int64 {
 	bc.mu.RLock()
 	memHead := int64(-1)
@@ -11,15 +12,33 @@ func (bc *Blockchain) HeadBlockNumber() int64 {
 	}
 	bc.mu.RUnlock()
 	if rocksHead, ok := bc.headBlockNumberFromRocks(); ok {
-		if rocksHead > memHead {
-			return rocksHead
-		}
+		return CanonicalHeadNumber(memHead, rocksHead, true)
 	}
 	return memHead
 }
 
-// HeadBlock returns a copy of the latest block record, or nil if empty.
+// HeadBlock returns a copy of the latest canonical block record, or nil if empty.
+// When Rocks is SoT, explorer tips leading Rocks head are not served (#57).
 func (bc *Blockchain) HeadBlock() *BlockRecord {
+	if rocksHead, ok := bc.headBlockNumberFromRocks(); ok {
+		if rocksHead < 0 {
+			return nil
+		}
+		bc.mu.RLock()
+		for i := len(bc.blockHistory) - 1; i >= 0; i-- {
+			if bc.blockHistory[i].BlockNumber == rocksHead {
+				out := bc.blockHistory[i]
+				bc.mu.RUnlock()
+				return &out
+			}
+		}
+		bc.mu.RUnlock()
+		if b := bc.getBlockFromRocks(rocksHead); b != nil {
+			return b
+		}
+		return nil
+	}
+
 	bc.mu.RLock()
 	if len(bc.blockHistory) > 0 {
 		out := bc.blockHistory[len(bc.blockHistory)-1]
@@ -27,12 +46,6 @@ func (bc *Blockchain) HeadBlock() *BlockRecord {
 		return &out
 	}
 	bc.mu.RUnlock()
-
-	if rocksHead, ok := bc.headBlockNumberFromRocks(); ok && rocksHead >= 0 {
-		if b := bc.getBlockFromRocks(rocksHead); b != nil {
-			return b
-		}
-	}
 	return nil
 }
 

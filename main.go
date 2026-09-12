@@ -213,6 +213,8 @@ func main() {
 	router.HandleFunc("/sockets", handler.GetSockets).Methods("GET")
 	// Read-only consistency diagnostic (issue #67) — never mutates / repairs ledgers.
 	router.HandleFunc("/internal/consistency", handler.ConsistencyCheck).Methods("GET")
+	// Minimal durability counters (issue #69) — see metrics.HowToRead.
+	router.HandleFunc("/internal/counters", handler.DurabilityCountersCheck).Methods("GET")
 
 	// RPC endpoints for monitoring (must be registered before root handler)
 	router.HandleFunc("/rpc/status", handler.GetDetailedStatus).Methods("GET")

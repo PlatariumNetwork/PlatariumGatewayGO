@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"platarium-gateway-go/internal/blockchain"
+	"platarium-gateway-go/internal/metrics"
 )
 
 // ConsistencyCheck is GET /internal/consistency — read-only diagnostic (issue #67).
@@ -18,11 +19,30 @@ func (h *Handler) ConsistencyCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	report := h.blockchain.BuildConsistencyDiagnostic()
+	if report.Status == blockchain.ConsistencyStatusDiverged {
+		metrics.Global.IncStateRocksDivergence()
+	}
 	status := http.StatusOK
 	if report.Status == blockchain.ConsistencyStatusDiverged {
 		status = http.StatusOK // still 200 — diagnostic, not an error channel
 	}
 	jsonResponse(w, status, report)
+}
+
+// DurabilityCountersCheck is GET /internal/counters — minimal Core/Rocks/divergence counters (#69).
+// See metrics.HowToRead / docs.ADRDurabilityCounters.
+func (h *Handler) DurabilityCountersCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
+		return
+	}
+	snap := metrics.Global.Snapshot()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"core_rpc_errors":         snap.CoreRPCErrors,
+		"rocks_commit_errors":     snap.RocksCommitErrors,
+		"state_rocks_divergence":  snap.StateRocksDivergence,
+		"how_to_read":             metrics.HowToRead,
+	})
 }
 
 // RunDoctorConsistency returns the structured diagnostic for --doctor CLI.
