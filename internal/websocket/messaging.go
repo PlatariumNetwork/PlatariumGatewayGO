@@ -720,13 +720,32 @@ func (s *Server) handleContactRespondWS(client *Client, data map[string]interfac
 	}
 	requestID := strField(data, "requestId")
 	outcome := strField(data, "outcome")
+	claimed := strField(data, "actor")
+	if claimed == "" {
+		claimed = client.Address
+	}
+	verified, err := protocol.ResolveAuthenticatedOwner(claimed, client.Address)
+	if err != nil {
+		_ = client.Conn.WriteJSON(map[string]interface{}{
+			"type": "contactRespondError",
+			"data": map[string]interface{}{"error": err.Error()},
+		})
+		return
+	}
 	sig := strField(data, "signature")
+	if err := protocol.RejectClientOwnedProof(sig); err != nil {
+		_ = client.Conn.WriteJSON(map[string]interface{}{
+			"type": "contactRespondError",
+			"data": map[string]interface{}{"error": err.Error()},
+		})
+		return
+	}
 	if strings.TrimSpace(sig) == "" {
-		// Inbox is already bound to this socket; treat as ownership proof (same as REST "owned:").
-		sig = "owned:" + client.Address
+		// Session address already verified via ResolveAuthenticatedOwner; Gateway-mint owned:.
+		sig = "owned:" + verified
 	}
 	enc := strField(data, "encryptedResponse")
-	req, err := ce.Respond(requestID, client.Address, outcome, sig)
+	req, err := ce.Respond(requestID, verified, outcome, sig)
 	if err != nil {
 		_ = client.Conn.WriteJSON(map[string]interface{}{
 			"type": "contactRespondError",
@@ -735,7 +754,7 @@ func (s *Server) handleContactRespondWS(client *Client, data map[string]interfac
 		return
 	}
 	if outcome == contacteconomy.OutcomeAccepted {
-		ce.AddXP(client.Address, 25)
+		ce.AddXP(verified, 25)
 		ce.AddXP(req.Sender, 10)
 	}
 	s.NotifyContactResolved(req, enc)
@@ -762,6 +781,17 @@ func (s *Server) handleContactPricingAnnounce(client *Client, data map[string]in
 		_ = client.Conn.WriteJSON(map[string]interface{}{
 			"type": "contactPricingError",
 			"data": map[string]interface{}{"error": "authenticated address required"},
+		})
+		return
+	}
+	claimed := strField(data, "address")
+	if claimed == "" {
+		claimed = addr
+	}
+	if _, err := protocol.ResolveAuthenticatedOwner(claimed, addr); err != nil {
+		_ = client.Conn.WriteJSON(map[string]interface{}{
+			"type": "contactPricingError",
+			"data": map[string]interface{}{"error": err.Error()},
 		})
 		return
 	}

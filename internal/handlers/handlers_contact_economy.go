@@ -111,6 +111,9 @@ func (h *Handler) verifyContactPricingOwnership(address, signature, mnemonic, al
 	if address == "" {
 		return "", fmt.Errorf("address required")
 	}
+	if err := protocol.RejectClientOwnedProof(signature); err != nil {
+		return "", err
+	}
 	if mnemonic != "" && alphanumeric != "" {
 		if h.rustCore == nil {
 			return "", fmt.Errorf("core unavailable for ownership proof")
@@ -120,13 +123,11 @@ func (h *Handler) verifyContactPricingOwnership(address, signature, mnemonic, al
 			return "", fmt.Errorf("GenerateKeys: %w", err)
 		}
 		pk := keys["publicKey"]
-		if !strings.EqualFold(pk, address) {
-			return "", fmt.Errorf("mnemonic does not match address")
+		verified, err := protocol.ResolveAuthenticatedOwner(address, pk)
+		if err != nil {
+			return "", err
 		}
-		return "owned:" + pk, nil
-	}
-	if strings.HasPrefix(signature, "owned:") {
-		return "", fmt.Errorf("owned: proof must be produced by Gateway after mnemonic verification")
+		return "owned:" + verified, nil
 	}
 	if strings.HasPrefix(signature, "sig-core:") && h.rustCore != nil {
 		sigHex := strings.TrimPrefix(signature, "sig-core:")
@@ -144,6 +145,9 @@ func (h *Handler) verifyContactPricingOwnership(address, signature, mnemonic, al
 		}
 		if !ok {
 			return "", fmt.Errorf("invalid contact pricing signature")
+		}
+		if _, err := protocol.ResolveAuthenticatedOwner(address, pub); err != nil {
+			return "", err
 		}
 		return signature, nil
 	}
@@ -335,6 +339,9 @@ func (h *Handler) verifyContactRespondOwnership(
 	if actor == "" {
 		return "", fmt.Errorf("actor required")
 	}
+	if err := protocol.RejectClientOwnedProof(signature); err != nil {
+		return "", err
+	}
 	if mnemonic != "" && alphanumeric != "" {
 		if h.rustCore == nil {
 			return "", fmt.Errorf("core unavailable for ownership proof")
@@ -344,14 +351,12 @@ func (h *Handler) verifyContactRespondOwnership(
 			return "", fmt.Errorf("GenerateKeys: %w", err)
 		}
 		pk := keys["publicKey"]
-		if !strings.EqualFold(pk, actor) {
-			return "", fmt.Errorf("mnemonic does not match actor address")
+		verified, err := protocol.ResolveAuthenticatedOwner(actor, pk)
+		if err != nil {
+			return "", err
 		}
 		// Gateway-minted marker only — never trust client-supplied owned:.
-		return "owned:" + pk, nil
-	}
-	if strings.HasPrefix(signature, "owned:") {
-		return "", fmt.Errorf("owned: proof must be produced by Gateway after mnemonic verification")
+		return "owned:" + verified, nil
 	}
 	if strings.HasPrefix(signature, "sig-core:") && h.rustCore != nil {
 		sigHex := strings.TrimPrefix(signature, "sig-core:")
@@ -371,6 +376,9 @@ func (h *Handler) verifyContactRespondOwnership(
 		}
 		if !ok {
 			return "", fmt.Errorf("invalid contact respond signature")
+		}
+		if _, err := protocol.ResolveAuthenticatedOwner(actor, pub); err != nil {
+			return "", err
 		}
 		return signature, nil
 	}

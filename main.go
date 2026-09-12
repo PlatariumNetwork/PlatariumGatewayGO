@@ -225,11 +225,11 @@ func main() {
 	router.HandleFunc("/api/l2-confirm", requireConsensusAuth(handler.L2ConfirmBlock)).Methods("POST")
 	router.HandleFunc("/api/confirm-block", requireConsensusAuth(handler.ConfirmBlock)).Methods("POST")
 	router.HandleFunc("/api/reward-config", handler.GetRewardConfig).Methods("GET")
-	router.HandleFunc("/api/reward-credit-l1", handler.RewardCreditL1).Methods("POST")
 	router.HandleFunc("/api/fee-distribution", handler.GetFeeDistribution).Methods("GET")
 	router.HandleFunc("/api/node-ratings", handler.GetNodeRatings).Methods("GET")
 	router.HandleFunc("/api/last-votes", handler.GetLastVotes).Methods("GET")
-	router.HandleFunc("/api/test-set-load", handler.TestSetLoad).Methods("POST")
+	// Lab mutation routes (test-set-load, reward-credit-l1): ENABLE_LAB_ENDPOINTS only.
+	handlers.RegisterLabRoutes(router, handler)
 	router.HandleFunc("/api/generate-wallet", handler.GenerateWallet).Methods("GET")
 	router.HandleFunc("/api/restore-wallet", handler.RestoreWallet).Methods("POST")
 	router.HandleFunc("/api/faucet", handler.Faucet).Methods("POST")

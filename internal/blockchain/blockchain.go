@@ -16,9 +16,19 @@ import (
 // ErrL2ConfirmTOCTOU is returned when pending mutated after Core apply succeeded.
 var ErrL2ConfirmTOCTOU = errors.New("L2ConfirmBlock TOCTOU")
 
+// ErrExplorerPersistAfterApply is returned when Core apply succeeded but explorer
+// persistChain failed; explorer was fully undone and txs requeued. Handlers must
+// not treat this as a pre-apply failure (no AbandonPendingBlock).
+var ErrExplorerPersistAfterApply = errors.New("explorer persist after apply")
+
 // IsL2ConfirmTOCTOU reports post-apply fence failures (must not requeue to mempool).
 func IsL2ConfirmTOCTOU(err error) bool {
 	return errors.Is(err, ErrL2ConfirmTOCTOU)
+}
+
+// IsExplorerPersistAfterApply reports persist-after-apply failures (explorer already undone).
+func IsExplorerPersistAfterApply(err error) bool {
+	return errors.Is(err, ErrExplorerPersistAfterApply)
 }
 
 // Transaction represents a blockchain transaction.
@@ -917,12 +927,15 @@ func (bc *Blockchain) L2ConfirmBlock() (moved []*Transaction, block BlockRecord,
 	bc.blockHistory = append(bc.blockHistory, block)
 	if err := bc.persistChain(); err != nil {
 		// Roll Core back and undo explorer mutations (#28) — do not leave tip applied.
+		// Keep backup until explorer rollback succeeds.
 		if statePath != "" && backupPath != "" {
 			_ = copyFile(backupPath, statePath)
 		}
-		os.Remove(backupPath)
 		bc.undoExplorerConfirmLocked(block, moved, "pending")
-		return nil, BlockRecord{}, "", err
+		if backupPath != "" {
+			_ = os.Remove(backupPath)
+		}
+		return nil, BlockRecord{}, "", fmt.Errorf("%w: %v", ErrExplorerPersistAfterApply, err)
 	}
 	return moved, block, backupPath, nil
 }
@@ -932,6 +945,62 @@ func DiscardStateBackup(backupPath string) {
 	if backupPath != "" {
 		_ = os.Remove(backupPath)
 	}
+}
+
+// ConfirmExplorerWithoutCore applies in-memory explorer confirm + persistChain without Core apply.
+// requeueOnFail is "pending" (L2) or "mempool" (legacy). On persist failure, restores Core from
+// backupPath→statePath (when set), undoes explorer, then removes backup. Used by unit tests for #28.
+func (bc *Blockchain) ConfirmExplorerWithoutCore(txs []*Transaction, requeueOnFail, backupPath, statePath string) (moved []*Transaction, block BlockRecord, err error) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	block = BlockRecord{
+		BlockNumber: bc.blockCounter,
+		Timestamp:   0,
+		TxHashes:    make([]string, 0),
+		TxCount:     0,
+		TotalFees:   0,
+	}
+	bc.blockCounter++
+	moved = make([]*Transaction, 0, len(txs))
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		fee := parseFee(tx.Fee)
+		if fee == 0 && tx.FeeUplp > 0 {
+			fee = int64(tx.FeeUplp)
+		}
+		block.TotalFees += fee
+		bc.totalFeesCollected += fee
+		tx.BlockNumber = block.BlockNumber
+		bc.transactions[tx.Hash] = tx
+		bc.lastTx = tx
+		bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
+		bc.addressTxs[tx.To] = append(bc.addressTxs[tx.To], tx)
+		block.TxHashes = append(block.TxHashes, tx.Hash)
+		block.TxCount++
+		bc.confirmedHashes[tx.Hash] = true
+		if block.Timestamp == 0 || tx.Timestamp > 0 {
+			block.Timestamp = tx.Timestamp
+		}
+		moved = append(moved, tx)
+	}
+	if block.Timestamp == 0 {
+		block.Timestamp = time.Now().Unix()
+	}
+	bc.blockHistory = append(bc.blockHistory, block)
+	if err := bc.persistChain(); err != nil {
+		if statePath != "" && backupPath != "" {
+			_ = copyFile(backupPath, statePath)
+		}
+		bc.undoExplorerConfirmLocked(block, moved, requeueOnFail)
+		if backupPath != "" {
+			_ = os.Remove(backupPath)
+		}
+		return nil, BlockRecord{}, fmt.Errorf("%w: %v", ErrExplorerPersistAfterApply, err)
+	}
+	return moved, block, nil
 }
 
 func removeTxFromAddressIndex(list []*Transaction, hash string) []*Transaction {
@@ -988,6 +1057,7 @@ func (bc *Blockchain) undoExplorerConfirmLocked(block BlockRecord, moved []*Tran
 
 // UndoLastConfirmedBlock restores Core from backupPath, removes the tip explorer block,
 // and requeues moved txs into pending (H10 / R2-H2 compensating action).
+// Backup is kept until explorer rollback succeeds.
 func (bc *Blockchain) UndoLastConfirmedBlock(block BlockRecord, moved []*Transaction, backupPath string) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -1000,10 +1070,10 @@ func (bc *Blockchain) UndoLastConfirmedBlock(block BlockRecord, moved []*Transac
 			return fmt.Errorf("restore core state after rocks failure: %w", err)
 		}
 	}
+	bc.undoExplorerConfirmLocked(block, moved, "pending")
 	if backupPath != "" {
 		_ = os.Remove(backupPath)
 	}
-	bc.undoExplorerConfirmLocked(block, moved, "pending")
 	return bc.persistChain()
 }
 
@@ -1057,12 +1127,15 @@ func (bc *Blockchain) ConfirmMempoolToChain() (moved []*Transaction, block Block
 	}
 	bc.blockHistory = append(bc.blockHistory, block)
 	if err := bc.persistChain(); err != nil {
+		// Keep backup until explorer rollback succeeds (#28).
 		if bc.ledger != nil && backupPath != "" {
 			_ = copyFile(backupPath, bc.ledger.StateFilePath())
 		}
-		os.Remove(backupPath)
 		bc.undoExplorerConfirmLocked(block, moved, "mempool")
-		return nil, BlockRecord{}, "", err
+		if backupPath != "" {
+			_ = os.Remove(backupPath)
+		}
+		return nil, BlockRecord{}, "", fmt.Errorf("%w: %v", ErrExplorerPersistAfterApply, err)
 	}
 	return moved, block, backupPath, nil
 }

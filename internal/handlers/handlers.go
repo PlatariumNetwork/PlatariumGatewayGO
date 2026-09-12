@@ -3168,6 +3168,12 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
+		if blockchain.IsExplorerPersistAfterApply(err) {
+			// Explorer already fully undone and txs requeued to pending — do not AbandonPendingBlock.
+			logger.Warn("L2 confirm persist-after-apply failed (explorer undone): %v", err)
+			jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
 		logger.Warn("L2 confirm apply failed: %v", err)
 		// Pre-apply failure: state was rolled back; pending pack still valid — requeue.
 		returned, dropped := h.blockchain.AbandonPendingBlock(nil)

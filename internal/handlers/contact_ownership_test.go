@@ -17,3 +17,11 @@ func TestVerifyContactPricingRejectsForgedOwned(t *testing.T) {
 		t.Fatal("expected rejection of client-supplied owned:")
 	}
 }
+
+func TestContactOwnershipUsesResolveAuthenticatedOwner(t *testing.T) {
+	// Missing auth path: no mnemonic and no sig → error.
+	h := &Handler{}
+	if _, err := h.verifyContactPricingOwnership("PxA", "", "", "", ""); err == nil {
+		t.Fatal("expected missing proof error")
+	}
+}

@@ -444,8 +444,12 @@ func allowDegradedConsensus() bool {
 }
 
 // finalizeVoteRoundWithCore uses Core vote aggregation when available.
-func (h *Handler) finalizeVoteRoundWithCore(votes map[string]bool, isL1 bool, timeoutAccepted bool) (accepted bool, toPenalize []string) {
-	accepted = timeoutAccepted
+// timeoutPending is the local threshold result before Core aggregation — it is NOT an accept.
+// When Core is unavailable, timeoutPending is returned as the provisional outcome (not "accepted").
+// timeoutRejected is simply timeoutPending == false.
+func (h *Handler) finalizeVoteRoundWithCore(votes map[string]bool, isL1 bool, timeoutPending bool) (accepted bool, toPenalize []string) {
+	// Provisional only: Core Confirmed is authoritative when process-votes succeeds.
+	accepted = timeoutPending
 	if h.rustCore == nil || len(votes) == 0 {
 		return accepted, nil
 	}
@@ -460,7 +464,7 @@ func (h *Handler) finalizeVoteRoundWithCore(votes map[string]bool, isL1 bool, ti
 		res, err = h.rustCore.L2ProcessVotes(votesJSON)
 	}
 	if err != nil || res == nil {
-		logger.Warn("Core process-votes failed, using timeout result: %v", err)
+		logger.Warn("Core process-votes failed, using timeout pending/rejected result: %v", err)
 		return accepted, nil
 	}
 	return res.Confirmed, res.ToPenalize

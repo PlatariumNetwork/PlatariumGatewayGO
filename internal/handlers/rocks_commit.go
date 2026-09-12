@@ -8,6 +8,25 @@ import (
 	"platarium-gateway-go/internal/logger"
 )
 
+// rocksAccountFromQuery copies balance/nonce and Tokens/Xp into a Rocks snapshot (#29).
+func rocksAccountFromQuery(q *core.AccountQuery) core.RocksAccount {
+	if q == nil {
+		return core.RocksAccount{Balance: "0", UplpBalance: "0"}
+	}
+	acct := core.RocksAccount{
+		Address:     q.Address,
+		Balance:     q.Balance,
+		UplpBalance: q.UplpBalance,
+		Nonce:       q.Nonce,
+		Tokens:      q.Tokens,
+		Xp:          q.Xp,
+	}
+	if acct.Xp == "" && len(acct.Tokens) > 0 {
+		acct.Xp = blockchain.TokenXPFromMap(acct.Tokens)
+	}
+	return acct
+}
+
 func (h *Handler) commitBlockToRocks(block blockchain.BlockRecord, txs []*blockchain.Transaction, stateRoot string) error {
 	rocks := h.blockchain.RocksStore()
 	if rocks == nil || !rocks.Enabled() {
@@ -63,17 +82,7 @@ func (h *Handler) commitBlockToRocks(block blockchain.BlockRecord, txs []*blockc
 			if err != nil {
 				return fmt.Errorf("query account %s: %w", addr, err)
 			}
-			acct = core.RocksAccount{
-				Address:     q.Address,
-				Balance:     q.Balance,
-				UplpBalance: q.UplpBalance,
-				Nonce:       q.Nonce,
-				Tokens:      q.Tokens,
-				Xp:          q.Xp,
-			}
-			if acct.Xp == "" && len(acct.Tokens) > 0 {
-				acct.Xp = blockchain.TokenXPFromMap(acct.Tokens)
-			}
+			acct = rocksAccountFromQuery(q)
 		} else {
 			found, ra, err := rocks.RocksGetAccount(addr)
 			if err != nil {
