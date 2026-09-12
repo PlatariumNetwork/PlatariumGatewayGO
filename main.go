@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -35,6 +36,7 @@ var (
 	wsTLSCert = flag.String("ws-tls-cert", "", "TLS cert for WebSocket (defaults to --tls-cert)")
 	wsTLSKey  = flag.String("ws-tls-key", "", "TLS key for WebSocket (defaults to --tls-key)")
 	peerTLSCA = flag.String("peer-tls-ca", "", "CA bundle for wss peer connections (PLATARIUM_PEER_TLS_CA)")
+	doctor    = flag.Bool("doctor", false, "Read-only consistency diagnostic (state_file/Rocks/chain.json) then exit; does not repair")
 )
 
 // requireConsensusAuth gates L1/L2 confirm routes (H11).
@@ -186,6 +188,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create handler: %v", err)
 	}
+	if *doctor {
+		// Diagnostic only — never repairs ledgers (issue #67).
+		rep := handler.RunDoctorConsistency()
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(rep)
+		if rep.Status == blockchain.ConsistencyStatusDiverged {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
 	if handlers.AutoBlockEnabled(*testnet) {
 		handler.StartAutoBlockWorker()
 		log.Printf("[AUTO-BLOCK] Gas-triggered block worker enabled (testnet consensus)")
@@ -198,6 +211,8 @@ func main() {
 	router.HandleFunc("/api", handler.HealthCheck).Methods("GET")
 	router.HandleFunc("/network", handler.NetworkStatus).Methods("GET")
 	router.HandleFunc("/sockets", handler.GetSockets).Methods("GET")
+	// Read-only consistency diagnostic (issue #67) — never mutates / repairs ledgers.
+	router.HandleFunc("/internal/consistency", handler.ConsistencyCheck).Methods("GET")
 
 	// RPC endpoints for monitoring (must be registered before root handler)
 	router.HandleFunc("/rpc/status", handler.GetDetailedStatus).Methods("GET")

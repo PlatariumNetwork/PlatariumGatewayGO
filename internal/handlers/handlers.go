@@ -3187,44 +3187,14 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	if header, hdrErr := h.assembleBlockHeader(block.BlockNumber, moved, myId, block.Timestamp); hdrErr == nil {
-		h.blockchain.ApplyBlockHeader(block.BlockNumber, *header, myId)
-		block.BlockHash = header.BlockHash
-		block.MerkleRoot = header.MerkleRoot
-		block.StateRoot = header.StateRoot
-		block.PreviousHash = header.PreviousHash
-		block.ProducerNodeID = myId
-		if err := h.commitBlockToRocks(block, moved, header.StateRoot); err != nil {
-			// H10 / R2-H2: roll Core + explorer tip back when Rocks fails after apply.
-			logger.Error("RocksDB commit after L2 confirm FAILED: %v", err)
-			if undoErr := h.blockchain.UndoLastConfirmedBlock(block, moved, stateBackup); undoErr != nil {
-				logger.Error("L2 rocks-fail rollback also failed: %v", undoErr)
-			}
-			jsonResponse(w, http.StatusInternalServerError, map[string]string{
-				"error": "rocks commit failed after L2 confirm: " + err.Error(),
-			})
-			return
-		}
-		blockchain.DiscardStateBackup(stateBackup)
-	} else {
-		// M6: with Rocks authoritative, L2 without header/commit leaves dual ledgers divergent.
-		if h.blockchain.RocksEnabled() {
-			logger.Error("assemble-block failed after L2 with Rocks enabled: %v", hdrErr)
-			if undoErr := h.blockchain.UndoLastConfirmedBlock(block, moved, stateBackup); undoErr != nil {
-				logger.Error("L2 assemble-fail rollback also failed: %v", undoErr)
-			}
-			jsonResponse(w, http.StatusInternalServerError, map[string]string{
-				"error": "assemble-block required when Rocks is authoritative: " + hdrErr.Error(),
-			})
-			return
-		}
-		blockchain.DiscardStateBackup(stateBackup)
-		logger.Warn("assemble-block failed after L2 confirm: %v", hdrErr)
-		// Still persist explorer cache without hashes so txs/blocks survive restart.
-		if err := h.blockchain.PersistChainSnapshot(); err != nil {
-			logger.Warn("Persist chain after L2 (no header) failed: %v", err)
-		}
+	// Unified confirm boundary (#56): prepare+explorer+persist already done in L2ConfirmBlock;
+	// FinalizeConfirmedBlock runs Rocks → commit marker → cleanup backup.
+	fin, finErr := h.FinalizeConfirmedBlock(block, moved, stateBackup, myId)
+	if finErr != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": finErr.Error()})
+		return
 	}
+	block = fin.Block
 	logger.Info("L2 block confirmed confirmer=%s blockNumber=%d moved=%d totalFees=%d", shortId(myId), block.BlockNumber, len(moved), block.TotalFees)
 	if h.exploreMetrics != nil && len(moved) > 0 {
 		h.exploreMetrics.recordL2Confirm(txHashesFromTransactions(moved))
@@ -3355,38 +3325,12 @@ func (h *Handler) ConfirmBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	myId := h.nodesManager.GetNodeID()
-	if header, hdrErr := h.assembleBlockHeader(block.BlockNumber, moved, myId, block.Timestamp); hdrErr == nil {
-		h.blockchain.ApplyBlockHeader(block.BlockNumber, *header, myId)
-		block.BlockHash = header.BlockHash
-		block.MerkleRoot = header.MerkleRoot
-		block.StateRoot = header.StateRoot
-		block.PreviousHash = header.PreviousHash
-		if err := h.commitBlockToRocks(block, moved, header.StateRoot); err != nil {
-			logger.Error("RocksDB commit after legacy confirm FAILED: %v", err)
-			if undoErr := h.blockchain.UndoLastConfirmedBlock(block, moved, stateBackup); undoErr != nil {
-				logger.Error("legacy rocks-fail rollback also failed: %v", undoErr)
-			}
-			jsonResponse(w, http.StatusInternalServerError, map[string]string{
-				"error": "rocks commit failed after confirm: " + err.Error(),
-			})
-			return
-		}
-		blockchain.DiscardStateBackup(stateBackup)
-	} else {
-		if h.blockchain.RocksEnabled() {
-			logger.Error("assemble-block failed after legacy confirm with Rocks enabled: %v", hdrErr)
-			if undoErr := h.blockchain.UndoLastConfirmedBlock(block, moved, stateBackup); undoErr != nil {
-				logger.Error("legacy assemble-fail rollback also failed: %v", undoErr)
-			}
-			jsonResponse(w, http.StatusInternalServerError, map[string]string{
-				"error": "assemble-block required when Rocks is authoritative: " + hdrErr.Error(),
-			})
-			return
-		}
-		blockchain.DiscardStateBackup(stateBackup)
-		logger.Warn("assemble-block failed after legacy confirm: %v", hdrErr)
-		_ = h.blockchain.PersistChainSnapshot()
+	fin, finErr := h.FinalizeConfirmedBlock(block, moved, stateBackup, myId)
+	if finErr != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": finErr.Error()})
+		return
 	}
+	block = fin.Block
 	if block.TotalFees > 0 {
 		h.distributor.ApplyBlock(block.TotalFees)
 	}

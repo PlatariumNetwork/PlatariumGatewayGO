@@ -13,8 +13,8 @@ type RocksAccount struct {
 	Balance     string            `json:"balance"`
 	UplpBalance string            `json:"uplp_balance"`
 	Nonce       uint64            `json:"nonce"`
-	Tokens      map[string]string `json:"tokens,omitempty"`
-	Xp          string            `json:"xp,omitempty"`
+	Tokens      map[string]string `json:"tokens"`
+	Xp          string            `json:"xp"`
 }
 
 // RocksBlockStored matches Core BlockRecordStored (rocks_get_block).

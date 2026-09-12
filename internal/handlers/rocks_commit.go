@@ -8,23 +8,42 @@ import (
 	"platarium-gateway-go/internal/logger"
 )
 
-// rocksAccountFromQuery copies balance/nonce and Tokens/Xp into a Rocks snapshot (#29).
+// rocksAccountFromQuery copies balance/nonce and Tokens/Xp into a Rocks snapshot (#54).
+// Tokens map is cloned so later mutations cannot silently drop commit fields.
+// Empty Tokens/Xp are normalized (never omitted as a silent Gateway-side drop).
 func rocksAccountFromQuery(q *core.AccountQuery) core.RocksAccount {
 	if q == nil {
-		return core.RocksAccount{Balance: "0", UplpBalance: "0"}
+		return core.RocksAccount{
+			Balance:     "0",
+			UplpBalance: "0",
+			Tokens:      map[string]string{},
+			Xp:          "0",
+		}
 	}
-	acct := core.RocksAccount{
+	tokens := cloneTokenMap(q.Tokens)
+	xp := q.Xp
+	if xp == "" {
+		xp = blockchain.TokenXPFromMap(tokens)
+	}
+	if xp == "" {
+		xp = "0"
+	}
+	return core.RocksAccount{
 		Address:     q.Address,
 		Balance:     q.Balance,
 		UplpBalance: q.UplpBalance,
 		Nonce:       q.Nonce,
-		Tokens:      q.Tokens,
-		Xp:          q.Xp,
+		Tokens:      tokens,
+		Xp:          xp,
 	}
-	if acct.Xp == "" && len(acct.Tokens) > 0 {
-		acct.Xp = blockchain.TokenXPFromMap(acct.Tokens)
+}
+
+func cloneTokenMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
 	}
-	return acct
+	return out
 }
 
 func (h *Handler) commitBlockToRocks(block blockchain.BlockRecord, txs []*blockchain.Transaction, stateRoot string) error {
@@ -89,9 +108,22 @@ func (h *Handler) commitBlockToRocks(block blockchain.BlockRecord, txs []*blockc
 				return err
 			}
 			if found && ra != nil {
-				acct = *ra
+				acct = rocksAccountFromQuery(&core.AccountQuery{
+					Address:     ra.Address,
+					Balance:     ra.Balance,
+					UplpBalance: ra.UplpBalance,
+					Nonce:       ra.Nonce,
+					Tokens:      ra.Tokens,
+					Xp:          ra.Xp,
+				})
 			} else {
-				acct = core.RocksAccount{Address: addr, Balance: "0", UplpBalance: "0"}
+				acct = core.RocksAccount{
+					Address:     addr,
+					Balance:     "0",
+					UplpBalance: "0",
+					Tokens:      map[string]string{},
+					Xp:          "0",
+				}
 			}
 		}
 		accounts = append(accounts, acct)

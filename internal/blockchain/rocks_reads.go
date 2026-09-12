@@ -183,14 +183,22 @@ func (bc *Blockchain) getAccountFromRocks(address string) (*core.AccountQuery, e
 			Balance: "0",
 		}, nil
 	}
+	tokens := acct.Tokens
+	if tokens == nil {
+		tokens = map[string]string{}
+	}
+	xp := acct.Xp
+	if xp == "" {
+		xp = TokenXPFromMap(tokens)
+	}
 	return &core.AccountQuery{
 		Address:     acct.Address,
 		Asset:       "PLP",
 		Balance:     acct.Balance,
 		UplpBalance: acct.UplpBalance,
 		Nonce:       acct.Nonce,
-		Tokens:      acct.Tokens,
-		Xp:          acct.Xp,
+		Tokens:      tokens,
+		Xp:          xp,
 	}, nil
 }
 
