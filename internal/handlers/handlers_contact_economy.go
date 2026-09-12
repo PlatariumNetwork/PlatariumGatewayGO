@@ -94,10 +94,12 @@ func (h *Handler) SetContactPricing(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	if _, err := h.verifyContactPricingOwnership(body.Address, body.Signature, body.Mnemonic, body.Alphanumeric, body.PubMain); err != nil {
+	verifiedAddr, err := h.verifyContactPricingOwnership(body.Address, body.Signature, body.Mnemonic, body.Alphanumeric, body.PubMain)
+	if err != nil {
 		jsonResponse(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
+	body.Address = verifiedAddr
 	p, err := h.contactEconomy.SetPricing(body.PricingAnnounce)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -123,7 +125,15 @@ func (h *Handler) verifyContactPricingOwnership(address, signature, mnemonic, al
 			return "", fmt.Errorf("GenerateKeys: %w", err)
 		}
 		pk := keys["publicKey"]
-		return protocol.MintOwnedProofAfterResolve(address, pk)
+		// Shared resolve+mint only — same helpers as WS contact respond.
+		verified, err := protocol.ResolveAuthenticatedOwner(address, pk)
+		if err != nil {
+			return "", err
+		}
+		if _, err := protocol.MintOwnedProof(verified); err != nil {
+			return "", err
+		}
+		return verified, nil
 	}
 	if strings.HasPrefix(signature, "sig-core:") && h.rustCore != nil {
 		sigHex := strings.TrimPrefix(signature, "sig-core:")
@@ -142,10 +152,11 @@ func (h *Handler) verifyContactPricingOwnership(address, signature, mnemonic, al
 		if !ok {
 			return "", fmt.Errorf("invalid contact pricing signature")
 		}
-		if _, err := protocol.ResolveAuthenticatedOwner(address, pub); err != nil {
+		verified, err := protocol.ResolveAuthenticatedOwner(address, pub)
+		if err != nil {
 			return "", err
 		}
-		return signature, nil
+		return verified, nil
 	}
 	return "", fmt.Errorf("provide mnemonic+alphanumeric ownership proof or sig-core signature")
 }
@@ -223,21 +234,21 @@ func (h *Handler) RespondContactRequest(w http.ResponseWriter, r *http.Request) 
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	proof, err := h.verifyContactRespondOwnership(body.Actor, body.RequestID, body.Outcome, body.Signature, body.Mnemonic, body.Alphanumeric, body.PubMain)
+	verifiedActor, proof, err := h.verifyContactRespondOwnership(body.Actor, body.RequestID, body.Outcome, body.Signature, body.Mnemonic, body.Alphanumeric, body.PubMain)
 	if err != nil {
 		jsonResponse(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
-	req, err := h.contactEconomy.Respond(body.RequestID, body.Actor, body.Outcome, proof)
+	req, err := h.contactEconomy.Respond(body.RequestID, verifiedActor, body.Outcome, proof)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	if body.Outcome == contacteconomy.OutcomeAccepted {
-		h.contactEconomy.AddXP(body.Actor, 25)
+		h.contactEconomy.AddXP(verifiedActor, 25)
 		h.contactEconomy.AddXP(req.Sender, 10)
 	} else if body.Outcome == contacteconomy.OutcomeRejected {
-		h.contactEconomy.AddXP(body.Actor, 1)
+		h.contactEconomy.AddXP(verifiedActor, 1)
 	}
 	if h.wsServer != nil {
 		h.wsServer.NotifyContactResolved(req, body.EncryptedResponse)
@@ -328,27 +339,37 @@ func (h *Handler) verifyEscrowLockTx(lockTxHash, sender string, amountUplp uint6
 }
 
 // verifyContactRespondOwnership proves actor controls the wallet.
+// Returns verified actor address and Gateway proof (owned: via MintOwnedProof, or sig-core).
+// Mint site is protocol.MintOwnedProof / MintOwnedProofAfterResolve only — same as WS.
 func (h *Handler) verifyContactRespondOwnership(
 	actor, requestID, outcome, signature, mnemonic, alphanumeric, pubMain string,
-) (string, error) {
+) (verifiedActor, proof string, err error) {
 	actor = strings.TrimSpace(actor)
 	if actor == "" {
-		return "", fmt.Errorf("actor required")
+		return "", "", fmt.Errorf("actor required")
 	}
 	if err := protocol.RejectClientOwnedProof(signature); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if mnemonic != "" && alphanumeric != "" {
 		if h.rustCore == nil {
-			return "", fmt.Errorf("core unavailable for ownership proof")
+			return "", "", fmt.Errorf("core unavailable for ownership proof")
 		}
 		keys, err := h.rustCore.GenerateKeys(mnemonic, alphanumeric, 0)
 		if err != nil {
-			return "", fmt.Errorf("GenerateKeys: %w", err)
+			return "", "", fmt.Errorf("GenerateKeys: %w", err)
 		}
 		pk := keys["publicKey"]
-		// Gateway-minted marker only — never trust client-supplied owned:.
-		return protocol.MintOwnedProofAfterResolve(actor, pk)
+		// Shared resolve+mint helpers — never concatenate owned: at REST call sites.
+		proof, err := protocol.MintOwnedProofAfterResolve(actor, pk)
+		if err != nil {
+			return "", "", err
+		}
+		verified, err := protocol.ResolveAuthenticatedOwner(actor, pk)
+		if err != nil {
+			return "", "", err
+		}
+		return verified, proof, nil
 	}
 	if strings.HasPrefix(signature, "sig-core:") && h.rustCore != nil {
 		sigHex := strings.TrimPrefix(signature, "sig-core:")
@@ -364,15 +385,16 @@ func (h *Handler) verifyContactRespondOwnership(
 		}
 		ok, err := h.rustCore.VerifySignature(msg, sigHex, pub)
 		if err != nil {
-			return "", fmt.Errorf("signature verify: %w", err)
+			return "", "", fmt.Errorf("signature verify: %w", err)
 		}
 		if !ok {
-			return "", fmt.Errorf("invalid contact respond signature")
+			return "", "", fmt.Errorf("invalid contact respond signature")
 		}
-		if _, err := protocol.ResolveAuthenticatedOwner(actor, pub); err != nil {
-			return "", err
+		verified, err := protocol.ResolveAuthenticatedOwner(actor, pub)
+		if err != nil {
+			return "", "", err
 		}
-		return signature, nil
+		return verified, signature, nil
 	}
-	return "", fmt.Errorf("provide mnemonic+alphanumeric ownership proof or sig-core signature")
+	return "", "", fmt.Errorf("provide mnemonic+alphanumeric ownership proof or sig-core signature")
 }

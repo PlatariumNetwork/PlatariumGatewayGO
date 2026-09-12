@@ -31,21 +31,23 @@ func (s *Server) addClientToAddrLocked(address string, client *Client) {
 		s.clientsByAddr[address] = m
 	}
 	// Same deviceId reconnecting: drop previous socket for that device.
+	// Clear Address + Authenticated so the replaced session cannot keep ownership.
 	if client.DeviceID != "" {
 		for id, c := range m {
 			if c != nil && c.DeviceID == client.DeviceID && c.ID != client.ID {
 				c.Address = ""
+				c.Authenticated = false
 				delete(m, id)
 				go func(old *Client) {
-					old.mu.Lock()
-					_ = old.Conn.WriteJSON(map[string]interface{}{
+					old.tryWriteJSON(map[string]interface{}{
 						"type": "forceLogout",
 						"data": map[string]interface{}{
 							"reason": "device_replaced",
 						},
 					})
-					_ = old.Conn.Close()
-					old.mu.Unlock()
+					if old.Conn != nil {
+						_ = old.Conn.Close()
+					}
 				}(c)
 			}
 		}
@@ -133,9 +135,7 @@ func (s *Server) broadcastDevicesUpdate(address string) {
 		},
 	}
 	for _, c := range recipients {
-		c.mu.Lock()
-		_ = c.Conn.WriteJSON(payload)
-		c.mu.Unlock()
+		c.tryWriteJSON(payload)
 	}
 }
 
@@ -143,10 +143,22 @@ func (s *Server) broadcastDevicesUpdate(address string) {
 // Address may be claimed without proof for routing; ownership session (Authenticated)
 // requires mnemonic+alphanumeric or sig-core via the Gateway ownership prover.
 func (s *Server) handleClientRegister(client *Client, data map[string]interface{}) {
+	if _, err := s.bindClientRegister(client, data); err != nil {
+		log.Printf("[MESSAGE] Register failed for client %s: %v", client.ID, err)
+		client.tryWriteJSON(map[string]interface{}{
+			"type": "registerError",
+			"data": map[string]interface{}{"error": err.Error()},
+		})
+	}
+}
+
+// bindClientRegister applies register/bind state. Ownership (Authenticated) is set only when
+// resolveRegisterAuthentication succeeds with proof; reconnect without proof stays unauthenticated.
+// Returns registered payload data for tests; nil Conn is allowed (no WS writes).
+func (s *Server) bindClientRegister(client *Client, data map[string]interface{}) (map[string]interface{}, error) {
 	addressRaw, ok := data["address"].(string)
 	if !ok || addressRaw == "" {
-		log.Printf("[MESSAGE] Invalid address registration from client %s", client.ID)
-		return
+		return nil, fmt.Errorf("address required")
 	}
 	address := normalizePlatariumAddress(addressRaw)
 
@@ -163,14 +175,7 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 
 	authed, err := s.resolveRegisterAuthentication(address, data)
 	if err != nil {
-		log.Printf("[MESSAGE] Register ownership proof failed for %s: %v", address, err)
-		client.mu.Lock()
-		_ = client.Conn.WriteJSON(map[string]interface{}{
-			"type": "registerError",
-			"data": map[string]interface{}{"error": err.Error()},
-		})
-		client.mu.Unlock()
-		return
+		return nil, err
 	}
 
 	var announceAddr, announcePk string
@@ -210,22 +215,21 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 	pending = filtered
 
 	log.Printf("[MESSAGE] Client %s registered address: %s device=%s (%s) sessions=%d authenticated=%v",
-		client.ID[:8], address, deviceID, deviceLabel, len(devices), authed)
+		shortID(client.ID), address, deviceID, deviceLabel, len(devices), authed)
 
-	client.mu.Lock()
-	_ = client.Conn.WriteJSON(map[string]interface{}{
+	payload := map[string]interface{}{
+		"address":          address,
+		"authenticated":    authed,
+		"deviceId":         deviceID,
+		"deviceLabel":      deviceLabel,
+		"deviceCount":      len(devices),
+		"devices":          devices,
+		"ownDevicesOnline": devices,
+	}
+	client.tryWriteJSON(map[string]interface{}{
 		"type": "registered",
-		"data": map[string]interface{}{
-			"address":          address,
-			"authenticated":    authed,
-			"deviceId":         deviceID,
-			"deviceLabel":      deviceLabel,
-			"deviceCount":      len(devices),
-			"devices":          devices,
-			"ownDevicesOnline": devices,
-		},
+		"data": payload,
 	})
-	client.mu.Unlock()
 
 	if len(pending) > 0 {
 		log.Printf("[MESSAGE] Delivering %d buffered message(s) to %s (device %s)", len(pending), address, deviceID)
@@ -239,13 +243,16 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 					"timestamp": m.Timestamp,
 				},
 			}
+			if client.Conn == nil {
+				continue
+			}
 			client.mu.Lock()
-			if err := client.Conn.WriteJSON(msg); err != nil {
+			err := client.Conn.WriteJSON(msg)
+			client.mu.Unlock()
+			if err != nil {
 				log.Printf("[MESSAGE] Error delivering buffered message to %s: %v", address, err)
-				client.mu.Unlock()
 				break
 			}
-			client.mu.Unlock()
 		}
 	}
 
@@ -254,6 +261,7 @@ func (s *Server) handleClientRegister(client *Client, data map[string]interface{
 	if announcePk != "" {
 		go s.broadcastE2eePubKeyAnnouncement(announceAddr, announcePk)
 	}
+	return payload, nil
 }
 
 // resolveRegisterAuthentication proves wallet control for an ownership session.
@@ -753,53 +761,39 @@ func (s *Server) handleContactRequestWS(client *Client, data map[string]interfac
 }
 
 func (s *Server) handleContactRespondWS(client *Client, data map[string]interface{}) {
+	ack, err := s.applyContactRespondWS(client, data)
+	if err != nil {
+		client.tryWriteJSON(map[string]interface{}{
+			"type": "contactRespondError",
+			"data": map[string]interface{}{"error": err.Error()},
+		})
+		return
+	}
+	client.tryWriteJSON(map[string]interface{}{
+		"type": "contactRespondAck",
+		"data": ack,
+	})
+}
+
+// applyContactRespondWS resolves authenticated owner and mints owned: via protocol helpers.
+// Empty signature without auth fails closed — no Respond / XP / settle side effects.
+func (s *Server) applyContactRespondWS(client *Client, data map[string]interface{}) (map[string]interface{}, error) {
 	s.mu.RLock()
 	ce := s.contactEconomy
 	s.mu.RUnlock()
 	if ce == nil {
-		return
+		return nil, fmt.Errorf("contact economy unavailable")
 	}
 	requestID := strField(data, "requestId")
 	outcome := strField(data, "outcome")
-	claimed := strField(data, "actor")
-	if claimed == "" {
-		claimed = client.Address
-	}
-	verified, err := protocol.ResolveAuthenticatedOwner(claimed, client.AuthenticatedOwner())
+	verified, sig, err := prepareContactRespondOwnership(client, data)
 	if err != nil {
-		_ = client.Conn.WriteJSON(map[string]interface{}{
-			"type": "contactRespondError",
-			"data": map[string]interface{}{"error": err.Error()},
-		})
-		return
-	}
-	sig := strField(data, "signature")
-	if err := protocol.RejectClientOwnedProof(sig); err != nil {
-		_ = client.Conn.WriteJSON(map[string]interface{}{
-			"type": "contactRespondError",
-			"data": map[string]interface{}{"error": err.Error()},
-		})
-		return
-	}
-	if strings.TrimSpace(sig) == "" {
-		// Session proved ownership at register; Gateway-mint owned: via shared helper.
-		sig, err = protocol.MintOwnedProof(verified)
-		if err != nil {
-			_ = client.Conn.WriteJSON(map[string]interface{}{
-				"type": "contactRespondError",
-				"data": map[string]interface{}{"error": err.Error()},
-			})
-			return
-		}
+		return nil, err
 	}
 	enc := strField(data, "encryptedResponse")
 	req, err := ce.Respond(requestID, verified, outcome, sig)
 	if err != nil {
-		_ = client.Conn.WriteJSON(map[string]interface{}{
-			"type": "contactRespondError",
-			"data": map[string]interface{}{"error": err.Error()},
-		})
-		return
+		return nil, err
 	}
 	if outcome == contacteconomy.OutcomeAccepted {
 		ce.AddXP(verified, 25)
@@ -807,13 +801,39 @@ func (s *Server) handleContactRespondWS(client *Client, data map[string]interfac
 	}
 	s.NotifyContactResolved(req, enc)
 	intent := protocol.ContactSettleFromRequest(req, "")
-	_ = client.Conn.WriteJSON(map[string]interface{}{
-		"type": "contactRespondAck",
-		"data": map[string]interface{}{
-			"request":      req,
-			"settleIntent": intent,
-		},
-	})
+	return map[string]interface{}{
+		"request":      req,
+		"settleIntent": intent,
+	}, nil
+}
+
+// prepareContactRespondOwnership uses AuthenticatedOwner only (never claimed Address alone)
+// and mints via protocol.MintOwnedProof after ResolveAuthenticatedOwner.
+func prepareContactRespondOwnership(client *Client, data map[string]interface{}) (verified, sig string, err error) {
+	auth := ""
+	if client != nil {
+		auth = client.AuthenticatedOwner()
+	}
+	claimed := strField(data, "actor")
+	if claimed == "" {
+		claimed = auth
+	}
+	verified, err = protocol.ResolveAuthenticatedOwner(claimed, auth)
+	if err != nil {
+		return "", "", err
+	}
+	sig = strField(data, "signature")
+	if err := protocol.RejectClientOwnedProof(sig); err != nil {
+		return "", "", err
+	}
+	if strings.TrimSpace(sig) == "" {
+		// Session proved ownership at register; Gateway-mint owned: via shared helper.
+		sig, err = protocol.MintOwnedProof(verified)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	return verified, sig, nil
 }
 
 func (s *Server) handleContactPricingAnnounce(client *Client, data map[string]interface{}) {
@@ -892,6 +912,13 @@ func (s *Server) handleContactPricingAnnounce(client *Client, data map[string]in
 func strField(data map[string]interface{}, key string) string {
 	v, _ := data[key].(string)
 	return v
+}
+
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 func (s *Server) DeliverContactRequest(req contacteconomy.ContactRequest) {

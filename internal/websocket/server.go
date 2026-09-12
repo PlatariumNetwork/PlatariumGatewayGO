@@ -77,6 +77,16 @@ func (c *Client) AuthenticatedOwner() string {
 	return c.Address
 }
 
+// tryWriteJSON writes JSON when Conn is set; no-op for nil Conn (unit tests).
+func (c *Client) tryWriteJSON(v interface{}) {
+	if c == nil || c.Conn == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.Conn.WriteJSON(v)
+}
+
 // OfflineMessage represents a message stored while recipient is offline
 type OfflineMessage struct {
 	From       string
@@ -301,8 +311,37 @@ func (s *Server) handleClientMessages(client *Client) {
 			s.handleContactRespondWS(client, data)
 		case "contactPricingAnnounce":
 			s.handleContactPricingAnnounce(client, data)
+		case "testSetLoad", "test-set-load", "rewardCreditL1", "reward-credit-l1":
+			// Lab mutations are REST-only (RegisterLabRoutes); reject WS aliases.
+			client.tryWriteJSON(map[string]interface{}{
+				"type": "error",
+				"data": map[string]interface{}{"error": "lab mutations not available over websocket"},
+			})
 		}
 	}
+}
+
+// knownWSClientMessageTypes lists inbound client message types handled by handleClientMessages.
+// Lab mutation names are intentionally absent from productive handlers (rejected above).
+func knownWSClientMessageTypes() []string {
+	return []string{
+		"newTransaction",
+		"ping",
+		"register",
+		"message",
+		"devices:list",
+		"devices:logout",
+		"e2eePubKeyRequest",
+		"protocolContactQuery",
+		"contactRequest",
+		"contactRespond",
+		"contactPricingAnnounce",
+	}
+}
+
+// wsLabMutationAliasAttempts are historical/guessed aliases audited for TASK-014 / issue #43.
+func wsLabMutationAliasAttempts() []string {
+	return []string{"testSetLoad", "test-set-load", "rewardCreditL1", "reward-credit-l1"}
 }
 
 func (s *Server) handleNewTransaction(data map[string]interface{}) {

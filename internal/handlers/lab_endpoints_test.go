@@ -198,3 +198,65 @@ func postLab(r *mux.Router, path string, body map[string]interface{}, token stri
 	r.ServeHTTP(rr, req)
 	return rr
 }
+
+// TestNoUnprotectedLabHandlerAliases audits alternate REST paths (issue #42 / TASK-013).
+// Checklist of scanned routes: LabMutationCanonicalPaths + LabMutationAliasCandidates.
+// Only canonical paths bind handlers, and only via RegisterLabRoutes + requireLabAuth.
+func TestNoUnprotectedLabHandlerAliases(t *testing.T) {
+	canonical := map[string]bool{}
+	for _, p := range LabMutationCanonicalPaths() {
+		canonical[p] = true
+	}
+	for _, alias := range LabMutationAliasCandidates() {
+		if canonical[alias] {
+			t.Fatalf("alias %q overlaps canonical lab path", alias)
+		}
+	}
+
+	t.Run("lab_off_aliases_404", func(t *testing.T) {
+		t.Setenv("ENABLE_LAB_ENDPOINTS", "")
+		r := mux.NewRouter()
+		RegisterLabRoutes(r, labTestHandler())
+		for _, path := range append(LabMutationCanonicalPaths(), LabMutationAliasCandidates()...) {
+			rr := postLab(r, path, map[string]interface{}{"currentTasks": 1, "maxCapacity": 10, "amount": 1}, "lab-secret")
+			if rr.Code != http.StatusNotFound {
+				t.Fatalf("%s lab_off: want 404 got %d", path, rr.Code)
+			}
+		}
+	})
+
+	t.Run("lab_on_aliases_still_404", func(t *testing.T) {
+		t.Setenv("ENABLE_LAB_ENDPOINTS", "1")
+		t.Setenv("PLATARIUM_LAB_TOKEN", "lab-secret")
+		h := labTestHandler()
+		h.nodeEarnedL1 = 50
+		r := mux.NewRouter()
+		RegisterLabRoutes(r, h)
+		found := map[string]bool{}
+		_ = r.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
+			path, err := route.GetPathTemplate()
+			if err != nil {
+				return nil
+			}
+			found[path] = true
+			return nil
+		})
+		for _, path := range LabMutationCanonicalPaths() {
+			if !found[path] {
+				t.Fatalf("canonical lab path missing when enabled: %s", path)
+			}
+		}
+		for _, alias := range LabMutationAliasCandidates() {
+			if found[alias] {
+				t.Fatalf("unprotected/alias lab route registered: %s", alias)
+			}
+			rr := postLab(r, alias, map[string]interface{}{"currentTasks": 9, "maxCapacity": 10, "amount": 7}, "lab-secret")
+			if rr.Code != http.StatusNotFound {
+				t.Fatalf("%s lab_on alias: want 404 got %d", alias, rr.Code)
+			}
+		}
+		if h.nodeEarnedL1 != 50 {
+			t.Fatalf("alias must not mutate L1 earnings: %d", h.nodeEarnedL1)
+		}
+	})
+}

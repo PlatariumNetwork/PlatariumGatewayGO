@@ -66,6 +66,36 @@ func RegisterLabRoutes(router *mux.Router, handler *Handler) {
 	if handler == nil || router == nil || !LabEndpointsEnabled() {
 		return
 	}
-	router.HandleFunc("/api/test-set-load", requireLabAuth(handler.TestSetLoad)).Methods("POST")
-	router.HandleFunc("/api/reward-credit-l1", requireLabAuth(handler.RewardCreditL1)).Methods("POST")
+	for _, path := range LabMutationCanonicalPaths() {
+		switch path {
+		case "/api/test-set-load":
+			router.HandleFunc(path, requireLabAuth(handler.TestSetLoad)).Methods("POST")
+		case "/api/reward-credit-l1":
+			router.HandleFunc(path, requireLabAuth(handler.RewardCreditL1)).Methods("POST")
+		}
+	}
+}
+
+// LabMutationCanonicalPaths are the only REST paths that may bind TestSetLoad / RewardCreditL1.
+func LabMutationCanonicalPaths() []string {
+	return []string{"/api/test-set-load", "/api/reward-credit-l1"}
+}
+
+// LabMutationAliasCandidates are alternate paths audited so unprotected aliases cannot remain
+// (issue #42 / TASK-013). None of these may invoke TestSetLoad or RewardCreditL1.
+func LabMutationAliasCandidates() []string {
+	return []string{
+		"/api/test/set-load",
+		"/api/testsetload",
+		"/api/test_set_load",
+		"/test-set-load",
+		"/rpc/test-set-load",
+		"/api/reward/credit-l1",
+		"/api/rewardcreditl1",
+		"/api/reward_credit_l1",
+		"/reward-credit-l1",
+		"/rpc/reward-credit-l1",
+		"/api/lab/test-set-load",
+		"/api/lab/reward-credit-l1",
+	}
 }
