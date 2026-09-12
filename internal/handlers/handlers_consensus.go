@@ -443,17 +443,23 @@ func allowDegradedConsensus() bool {
 
 // finalizeVoteRoundWithCore uses Core vote aggregation when available.
 // timeoutPending is the local threshold result before Core aggregation — it is NOT an accept.
-// When Core is unavailable (nil), timeoutPending is returned as the provisional outcome.
-// On Core process-votes failure (error or nil result), always reject — never fall back to
-// the old timeoutAccepted accept-on-error behavior. Uncertainty never increases authority.
-func (h *Handler) finalizeVoteRoundWithCore(votes map[string]bool, isL1 bool, timeoutPending bool) (accepted bool, toPenalize []string) {
-	if h.rustCore == nil || len(votes) == 0 {
-		return timeoutPending, nil
+// When Core is unavailable (nil), timeoutPending is returned as the provisional outcome
+// (only if there is at least one vote).
+// Empty / zero-vote aggregation always rejects (no finality) — issue #51.
+// On Core process-votes failure (error or nil result), always reject and set coreRPCFailed
+// so degraded-consensus overrides cannot accept — issues #47–#50, #53.
+// Uncertainty never increases authority.
+func (h *Handler) finalizeVoteRoundWithCore(votes map[string]bool, isL1 bool, timeoutPending bool) (accepted bool, toPenalize []string, coreRPCFailed bool) {
+	if len(votes) == 0 {
+		return false, nil, false
+	}
+	if h.rustCore == nil {
+		return timeoutPending, nil, false
 	}
 	votesJSON, err := votesToCoreJSON(votes)
 	if err != nil {
 		logger.Warn("Core process-votes: votes JSON failed, rejecting: %v", err)
-		return false, nil
+		return false, nil, true
 	}
 	var res *core.VoteResult
 	if isL1 {
@@ -463,9 +469,22 @@ func (h *Handler) finalizeVoteRoundWithCore(votes map[string]bool, isL1 bool, ti
 	}
 	if err != nil || res == nil {
 		logger.Warn("Core process-votes failed, rejecting (no timeoutAccepted fallback): %v", err)
-		return false, nil
+		return false, nil, true
 	}
-	return res.Confirmed, res.ToPenalize
+	return res.Confirmed, res.ToPenalize, false
+}
+
+// maybeDegradedAccept may flip a rejected round to accepted only when peers are missing
+// and Core did not fail. Core RPC failure always fail-closes even with
+// PLATARIUM_ALLOW_DEGRADED_CONSENSUS (issue #53).
+func maybeDegradedAccept(accepted, coreRPCFailed bool, totalExpected int, votes map[string]bool, myId string) (bool, bool) {
+	if accepted || coreRPCFailed || !allowDegradedConsensus() {
+		return accepted, false
+	}
+	if totalExpected > 1 && len(votes) == 1 && votes[myId] {
+		return true, true
+	}
+	return accepted, false
 }
 
 func (h *Handler) applyVoteSlashing(votes map[string]bool, toPenalize []string, committee map[string]bool) {

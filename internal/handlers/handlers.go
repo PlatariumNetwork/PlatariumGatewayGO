@@ -2775,11 +2775,14 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Info("L1 round result totalExpected=%d need=%d yes=%d total_votes=%d accepted=%v voters=%v", totalExpected, need, yesCount, len(round.votes), ok, voterIds)
 
-	accepted, toPenalize := h.finalizeVoteRoundWithCore(round.votes, true, ok)
-	if !accepted && allowDegradedConsensus() && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
+	accepted, toPenalize, coreRPCFailed := h.finalizeVoteRoundWithCore(round.votes, true, ok)
+	var degradedApplied bool
+	accepted, degradedApplied = maybeDegradedAccept(accepted, coreRPCFailed, totalExpected, round.votes, myId)
+	if degradedApplied {
 		logger.Warn("L1 degraded: no peer votes (only proposer), accepting")
-		accepted = true
 		toPenalize = nil
+	} else if !accepted && coreRPCFailed {
+		logger.Warn("L1 Core RPC failed: degraded accept blocked (fail-closed)")
 	} else if !accepted && !allowDegradedConsensus() && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
 		logger.Warn("L1 strict mode: degraded accept disabled")
 	}
@@ -3100,11 +3103,14 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Info("L2 round result totalExpected=%d need=%d yes=%d total_votes=%d accepted=%v voters=%v", totalExpected, needL2, yesCountL2, len(round.votes), ok, voterIdsL2)
 
-	acceptedL2, toPenalizeL2 := h.finalizeVoteRoundWithCore(round.votes, false, ok)
-	if !acceptedL2 && allowDegradedConsensus() && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
+	acceptedL2, toPenalizeL2, coreRPCFailedL2 := h.finalizeVoteRoundWithCore(round.votes, false, ok)
+	var degradedAppliedL2 bool
+	acceptedL2, degradedAppliedL2 = maybeDegradedAccept(acceptedL2, coreRPCFailedL2, totalExpected, round.votes, myId)
+	if degradedAppliedL2 {
 		logger.Warn("L2 degraded: no peer votes (only confirmer), accepting")
-		acceptedL2 = true
 		toPenalizeL2 = nil
+	} else if !acceptedL2 && coreRPCFailedL2 {
+		logger.Warn("L2 Core RPC failed: degraded accept blocked (fail-closed)")
 	} else if !acceptedL2 && !allowDegradedConsensus() && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
 		logger.Warn("L2 strict mode: degraded accept disabled")
 	}
