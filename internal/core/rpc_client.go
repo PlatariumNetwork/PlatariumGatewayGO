@@ -15,13 +15,14 @@ import (
 // RPCClient talks to platarium-cli serve over newline-delimited JSON-RPC 2.0.
 // Keeps a persistent connection (TCP or Unix) and reconnects on failure.
 type RPCClient struct {
-	addr      string // dial target: host:port or unix path
-	network   string // "tcp" or "unix"
-	authToken string
-	mu        sync.Mutex
-	id        int64
-	conn      net.Conn
-	reader    *bufio.Reader
+	addr        string // dial target: host:port or unix path
+	network     string // "tcp" or "unix"
+	authToken   string
+	callTimeout time.Duration // per round-trip deadline; 0 ⇒ 60s default
+	mu          sync.Mutex
+	id          int64
+	conn        net.Conn
+	reader      *bufio.Reader
 }
 
 // ParseRPCAddr returns network ("tcp"|"unix") and dial address.
@@ -198,7 +199,11 @@ func (c *RPCClient) roundTripLocked(reqBytes []byte, reqID int64) (result string
 	if err := c.ensureConnLocked(); err != nil {
 		return "", false, err
 	}
-	_ = c.conn.SetDeadline(time.Now().Add(60 * time.Second))
+	timeout := c.callTimeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	_ = c.conn.SetDeadline(time.Now().Add(timeout))
 	if _, err := fmt.Fprintf(c.conn, "%s\n", reqBytes); err != nil {
 		_ = c.conn.Close()
 		c.conn = nil

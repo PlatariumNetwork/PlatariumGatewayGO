@@ -450,6 +450,13 @@ func (s *Store) Respond(requestID, actor, outcome, signature string) (ContactReq
 		return ContactRequest{}, fmt.Errorf("invalid signature: use wallet ownership proof")
 	}
 	actor = normalize(actor)
+	// Gateway-minted owned:<actor> only — reject forged markers like owned:forged.
+	if strings.HasPrefix(signature, "owned:") {
+		ownedAddr := normalize(strings.TrimPrefix(signature, "owned:"))
+		if ownedAddr == "" || !strings.EqualFold(ownedAddr, actor) {
+			return ContactRequest{}, fmt.Errorf("owned: proof does not match actor")
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	req, ok := s.data.Requests[requestID]

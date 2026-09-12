@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // RustCore wraps Platarium Core — either a long-lived JSON-RPC daemon (default)
@@ -75,6 +76,19 @@ func (rc *RustCore) Mode() string {
 		return "rpc"
 	}
 	return "cli"
+}
+
+// NewRustCoreFromRPC binds Gateway to an existing Core JSON-RPC client (tests / advanced wiring).
+func NewRustCoreFromRPC(client *RPCClient) *RustCore {
+	return &RustCore{rpcClient: client}
+}
+
+// SetRPCCallTimeout sets the per-call deadline for the bound RPC client (0 restores default).
+func (rc *RustCore) SetRPCCallTimeout(d time.Duration) {
+	if rc == nil || rc.rpcClient == nil {
+		return
+	}
+	rc.rpcClient.callTimeout = d
 }
 
 // Close releases the persistent RPC connection (does not stop a shared Core daemon).

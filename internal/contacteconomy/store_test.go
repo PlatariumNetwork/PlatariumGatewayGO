@@ -224,6 +224,31 @@ func TestStubSignatureRejected(t *testing.T) {
 	}
 }
 
+func TestOwnedForgedRejectedByStore(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(filepath.Join(dir, "ce.json"), Config{
+		Enabled: true, MinFeeUplp: 1, MaxFeeUplp: 1e12, TimeoutSecs: 3600, BasePendingLimit: 5, EconomyGateDMs: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.CreateRequest(ContactRequest{
+		RequestID: "forge-1", Sender: "PxA", Receiver: "PxB", EncryptedPayload: "c",
+		LockTxHash: "4444444444444444444444444444444444444444444444444444444444444444", AmountUplp: 10,
+		SenderPubKey: "a", ReceiverPubKey: "b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Respond("forge-1", "PxB", OutcomeAccepted, "owned:forged"); err == nil {
+		t.Fatal("owned:forged must not be accepted by store")
+	}
+	req, ok := store.GetRequest("forge-1")
+	if !ok || req.Status != StatusPending {
+		t.Fatalf("request must stay pending: %+v", req)
+	}
+}
+
 func TestExpireDue(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(filepath.Join(dir, "ce.json"), Config{
