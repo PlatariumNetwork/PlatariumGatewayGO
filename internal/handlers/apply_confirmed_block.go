@@ -139,8 +139,11 @@ func (h *Handler) FinalizeConfirmedBlock(
 	return h.DurableCommitAfterExplorer(out.Block, moved, stateBackup)
 }
 
-// ApplyPeerConfirmedBlock routes peer block_confirmed through the shared confirm primitive (#60):
-// AddConfirmedBlock (prepare/apply/persist, backup retained) → DurableCommitAfterExplorer.
+// ApplyPeerConfirmedBlock routes peer block_confirmed through the shared confirm durability
+// boundary (#60/#78): AddConfirmedBlock (prepare/apply/persist, .l2bak retained) then the
+// FinalizeConfirmedBlock durability half — DurableCommitAfterExplorer (Rocks → commit marker
+// → DiscardStateBackup / UndoLastConfirmedBlock on failure). Peer blocks already carry
+// producer headers, so assemble/ApplyBlockHeader is skipped.
 func (h *Handler) ApplyPeerConfirmedBlock(block blockchain.BlockRecord, txs []*blockchain.Transaction) (bool, error) {
 	added, backupPath, err := h.blockchain.AddConfirmedBlock(block, txs)
 	if err != nil {

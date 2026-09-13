@@ -679,7 +679,8 @@ func parseFee(fee string) int64 {
 
 // applyConfirmedTransactions applies each transaction through Core ledger.
 // The state file is snapshotted first so a mid-batch failure can roll back cleanly.
-// On success returns backupPath; caller must os.Remove(backupPath) after confirm completes.
+// On success returns backupPath retained until DurableCommitAfterExplorer / DiscardStateBackup
+// (never remove before Rocks/commit-marker success — #60/#78).
 func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) (backupPath string, err error) {
 	bc.mu.RLock()
 	ledger := bc.ledger
@@ -1090,24 +1091,32 @@ func (bc *Blockchain) undoExplorerConfirmLocked(block BlockRecord, moved []*Tran
 	}
 }
 
+// rollbackConfirmLocked restores Core from backupPath and undoes explorer tip side effects.
+// Shared by UndoLastConfirmedBlock (L2/legacy) and peer AddConfirmedBlock (#60/#78).
+// Caller must hold bc.mu. Does not re-persist chain.json — caller decides.
+// Returns an error only when Core restore from backup fails; explorer undo still runs.
+func (bc *Blockchain) rollbackConfirmLocked(block BlockRecord, moved []*Transaction, backupPath, requeue string) error {
+	var restoreErr error
+	if bc.ledger != nil && backupPath != "" {
+		if err := copyFile(backupPath, bc.ledger.StateFilePath()); err != nil {
+			restoreErr = fmt.Errorf("restore core state after rocks failure: %w", err)
+		}
+	}
+	bc.undoExplorerConfirmLocked(block, moved, requeue)
+	if backupPath != "" {
+		_ = os.Remove(backupPath)
+	}
+	return restoreErr
+}
+
 // UndoLastConfirmedBlock restores Core from backupPath, removes the tip explorer block,
 // and requeues moved txs into pending (H10 / R2-H2 compensating action).
-// Backup is kept until explorer rollback succeeds.
+// Uses the same rollbackConfirmLocked primitive as peer AddConfirmedBlock (#78).
 func (bc *Blockchain) UndoLastConfirmedBlock(block BlockRecord, moved []*Transaction, backupPath string) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
-	statePath := ""
-	if bc.ledger != nil {
-		statePath = bc.ledger.StateFilePath()
-	}
-	if statePath != "" && backupPath != "" {
-		if err := copyFile(backupPath, statePath); err != nil {
-			return fmt.Errorf("restore core state after rocks failure: %w", err)
-		}
-	}
-	bc.undoExplorerConfirmLocked(block, moved, "pending")
-	if backupPath != "" {
-		_ = os.Remove(backupPath)
+	if err := bc.rollbackConfirmLocked(block, moved, backupPath, "pending"); err != nil {
+		return err
 	}
 	return bc.persistChain()
 }
@@ -1259,30 +1268,18 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 
 	bc.blockHistory = append(bc.blockHistory, block)
 
-	// Injected explorer write failure (#61): undo in-memory tip; never leave a half tip.
+	// Injected explorer write failure (#61/#79): shared undo; never leave a half tip.
 	if bc.peerConfirmInject == PeerInjectExplorerWrite {
-		if bc.ledger != nil && backupPath != "" {
-			_ = copyFile(backupPath, bc.ledger.StateFilePath())
-		}
-		bc.undoExplorerConfirmLocked(block, moved, "mempool")
-		if backupPath != "" {
-			_ = os.Remove(backupPath)
-		}
-		return false, "", fmt.Errorf("explorer write failed: injected failure (no half tip)")
+		_ = bc.rollbackConfirmLocked(block, moved, backupPath, "mempool")
+		return false, "", fmt.Errorf("%w: explorer write failed: injected failure (no half tip)", ErrExplorerPersistAfterApply)
 	}
 
 	if err := bc.persistChain(); err != nil {
-		// Shared rollback: restore Core backup + undo explorer; do not leave half tip (#60/#62).
-		if bc.ledger != nil && backupPath != "" {
-			_ = copyFile(backupPath, bc.ledger.StateFilePath())
-		}
-		bc.undoExplorerConfirmLocked(block, moved, "mempool")
-		if backupPath != "" {
-			_ = os.Remove(backupPath)
-		}
+		// Shared UndoLastConfirmedBlock primitive (rollbackConfirmLocked) — no half tip (#60/#78).
+		_ = bc.rollbackConfirmLocked(block, moved, backupPath, "mempool")
 		return false, "", fmt.Errorf("%w: %v", ErrExplorerPersistAfterApply, err)
 	}
-	// Backup retained for DurableCommitAfterExplorer (Rocks → commit marker → cleanup).
+	// Backup retained for DurableCommitAfterExplorer / FinalizeConfirmedBlock durability half.
 	return true, backupPath, nil
 }
 

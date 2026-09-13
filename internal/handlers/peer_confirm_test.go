@@ -10,7 +10,8 @@ import (
 	"platarium-gateway-go/internal/metrics"
 )
 
-// Issue #61: peer confirm explorer write failure → full rollback, no half tip.
+// Issue #61/#79/#80: peer confirm explorer write failure → ErrExplorerPersistAfterApply,
+// full rollback, no half tip.
 func TestPeerConfirmExplorerWriteFailureRollsBack(t *testing.T) {
 	dir := t.TempDir()
 	bc := blockchain.NewBlockchain()
@@ -28,8 +29,8 @@ func TestPeerConfirmExplorerWriteFailureRollsBack(t *testing.T) {
 	}
 	h := &Handler{blockchain: bc}
 	added, err := h.ApplyPeerConfirmedBlock(block, []*blockchain.Transaction{tx})
-	if err == nil || !strings.Contains(err.Error(), "explorer write failed") {
-		t.Fatalf("want explorer write failure, got added=%v err=%v", added, err)
+	if !blockchain.IsExplorerPersistAfterApply(err) {
+		t.Fatalf("want ErrExplorerPersistAfterApply, got added=%v err=%v", added, err)
 	}
 	if added {
 		t.Fatal("must not report added on explorer write failure")
@@ -40,12 +41,16 @@ func TestPeerConfirmExplorerWriteFailureRollsBack(t *testing.T) {
 	if bc.HeadBlockNumber() != -1 {
 		t.Fatalf("head=%d want -1 (no half tip)", bc.HeadBlockNumber())
 	}
+	if tip := bc.HeadBlock(); tip != nil {
+		t.Fatalf("half tip after explorer write fail: %+v", tip)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "chain.json")); !os.IsNotExist(err) {
 		t.Fatal("chain.json must not remain after explorer write rollback")
 	}
 }
 
-// Issue #62: peer confirm chain.json persist failure → explorer side effects rolled back.
+// Issue #61/#62/#79/#80: peer confirm chain.json persist failure → explorer rolled back,
+// ErrExplorerPersistAfterApply, no half tip (peer path, not L2 ConfirmExplorerWithoutCore).
 func TestPeerConfirmChainJSONWriteFailureRollsBackExplorer(t *testing.T) {
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "not-a-dir")
@@ -82,6 +87,9 @@ func TestPeerConfirmChainJSONWriteFailureRollsBackExplorer(t *testing.T) {
 	// Compensating requeue to mempool is expected; confirmed tip must stay clear.
 	if tip := bc.HeadBlock(); tip != nil {
 		t.Fatalf("half tip after chain.json fail: %+v", tip)
+	}
+	if bc.HeadBlockNumber() != -1 {
+		t.Fatalf("head advanced after persist fail: %d", bc.HeadBlockNumber())
 	}
 	mp := bc.GetMempool()
 	if len(mp) != 1 || mp[0].Hash != tx.Hash {
@@ -141,7 +149,8 @@ func TestPeerConfirmRocksWriteBatchFailureKeepsPriorHead(t *testing.T) {
 	}
 }
 
-// Issue #64: crash mid-path → restart leaves recoverable non-divergent tip (ADR tip freeze).
+// Issue #64/#81: peer ApplyPeerConfirmedBlock crash mid-path (explorer/persist done, Rocks not
+// committed) → restart (LoadChainFile + Rocks SoT tip-freeze) leaves recoverable non-divergent tip.
 func TestPeerConfirmCrashMidPathRecovery(t *testing.T) {
 	dir := t.TempDir()
 	chainPath := filepath.Join(dir, "chain.json")
@@ -157,38 +166,31 @@ func TestPeerConfirmCrashMidPathRecovery(t *testing.T) {
 		TxCount:     1,
 		Timestamp:   1,
 	}
-	backup := filepath.Join(dir, "core-state.json.l2bak")
-	if err := os.WriteFile(backup, []byte(`{"crash":true}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	h := &Handler{blockchain: bc}
-	added, backupPath, err := bc.AddConfirmedBlock(block, []*blockchain.Transaction{tx})
-	if err != nil || !added {
-		t.Fatalf("stage explorer: added=%v err=%v", added, err)
-	}
-	if backupPath == "" {
-		backupPath = backup
-	}
 	h.SetConfirmFailPoint(FailPointCrashAfterExplorer)
-	res, err := h.DurableCommitAfterExplorer(block, []*blockchain.Transaction{tx}, backupPath)
+	added, err := h.ApplyPeerConfirmedBlock(block, []*blockchain.Transaction{tx})
 	if err == nil || !strings.Contains(err.Error(), string(FailPointCrashAfterExplorer)) {
-		t.Fatalf("want crash fail-point, got %v", err)
+		t.Fatalf("want crash fail-point via ApplyPeerConfirmedBlock, got added=%v err=%v", added, err)
 	}
-	if !res.BackupKept {
-		t.Fatal("crash must retain backup for recovery")
-	}
-	if _, statErr := os.Stat(backupPath); os.IsNotExist(statErr) {
-		t.Fatal("backup missing after simulated crash")
+	if added {
+		t.Fatal("crash mid-path must not report durable add")
 	}
 	// Explorer tip was written to chain.json (rebuildable cache ahead of Rocks).
 	if len(bc.GetBlockHistory()) != 1 {
 		t.Fatalf("pre-crash explorer tip missing: %d", len(bc.GetBlockHistory()))
 	}
+	if _, statErr := os.Stat(chainPath); statErr != nil {
+		t.Fatalf("chain.json missing after crash mid-path: %v", statErr)
+	}
 
-	// Restart: load chain.json, Rocks SoT still at genesis → freeze leading tip (ADR).
+	// Restart: reload chain.json cache, Rocks SoT still at genesis → freeze leading tip (ADR).
 	restarted := blockchain.NewBlockchain()
 	if err := restarted.LoadChainFile(chainPath); err != nil {
+		t.Fatal(err)
+	}
+	// SyncFromRocksHead with empty Rocks keeps explorer cache; tip-freeze must still refuse to serve it.
+	if err := restarted.SyncFromRocksHead(); err != nil {
 		t.Fatal(err)
 	}
 	rocksHead := int64(-1) // no committed Rocks tip
@@ -201,6 +203,9 @@ func TestPeerConfirmCrashMidPathRecovery(t *testing.T) {
 	}
 	if tip := restarted.HeadBlock(); tip != nil {
 		t.Fatalf("canonical tip must be empty after crash before Rocks commit, got %+v", tip)
+	}
+	if restarted.GetBlockByNumber(0) != nil {
+		t.Fatal("leading block number must not be served after tip-freeze recovery")
 	}
 }
 

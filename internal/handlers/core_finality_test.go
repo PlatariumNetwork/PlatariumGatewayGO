@@ -260,7 +260,9 @@ func TestEmptyVoteResultNoFinality(t *testing.T) {
 	}
 }
 
-// Issue #53: degraded opt-in still rejects on Core RPC error (fail-closed).
+// Issue #53/#77: degraded opt-in still rejects on Core RPC / process-votes error (fail-closed).
+// L1 and L2 handlers call finalizeVoteRoundWithCore → maybeDegradedAccept; Core failure must
+// not flip accepted=true even when only the local proposer/confirmer voted yes.
 func TestDegradedConsensusStillFailClosedOnCoreRPCError(t *testing.T) {
 	t.Setenv("PLATARIUM_ALLOW_DEGRADED_CONSENSUS", "true")
 	if !allowDegradedConsensus() {
@@ -282,16 +284,22 @@ func TestDegradedConsensusStillFailClosedOnCoreRPCError(t *testing.T) {
 	h := &Handler{rustCore: rc}
 	myID := "proposer-1"
 	votes := map[string]bool{myID: true}
+
+	// L1: Core RPC error → reject; degraded must not override (multi-node, sole yes vote).
 	finalized, _, coreFailed := h.finalizeVoteRoundWithCore(votes, true, true)
 	if finalized || !coreFailed {
-		t.Fatal("Core RPC error must reject and mark coreRPCFailed")
+		t.Fatal("L1 Core RPC error must reject and mark coreRPCFailed")
 	}
 	accepted, applied := maybeDegradedAccept(finalized, coreFailed, 3, votes, myID)
 	if applied || accepted {
-		t.Fatal("degraded opt-in must not accept when Core RPC failed")
+		t.Fatal("L1 degraded opt-in must not accept when Core RPC failed")
 	}
 
+	// L2: same fail-closed contract.
 	finalizedL2, _, coreFailedL2 := h.finalizeVoteRoundWithCore(votes, false, true)
+	if finalizedL2 || !coreFailedL2 {
+		t.Fatal("L2 Core RPC error must reject and mark coreRPCFailed")
+	}
 	acceptedL2, appliedL2 := maybeDegradedAccept(finalizedL2, coreFailedL2, 3, votes, myID)
 	if appliedL2 || acceptedL2 {
 		t.Fatal("L2 degraded opt-in must not accept when Core RPC failed")
