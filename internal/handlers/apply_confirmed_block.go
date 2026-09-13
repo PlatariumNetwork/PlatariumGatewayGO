@@ -17,6 +17,10 @@ const (
 	// FailPointAfterExplorerBeforeRocks injects failure after explorer apply/persist
 	// and header apply, before Rocks commit — between apply and Rocks (#59).
 	FailPointAfterExplorerBeforeRocks ConfirmFailPoint = "after_explorer_before_rocks"
+	// FailPointRocksWriteBatch injects Rocks WriteBatch failure after explorer persist (#63).
+	FailPointRocksWriteBatch ConfirmFailPoint = "rocks_write_batch"
+	// FailPointCrashAfterExplorer leaves explorer tip + backup without undo (crash mid-path #64).
+	FailPointCrashAfterExplorer ConfirmFailPoint = "crash_after_explorer"
 )
 
 // ConfirmBoundarySteps documents the unified confirm durability boundary (issue #56).
@@ -61,6 +65,24 @@ func (h *Handler) DurableCommitAfterExplorer(
 		}
 		out.BackupKept = false
 		return out, fmt.Errorf("injected failure at %s: no advanced canonical tip", FailPointAfterExplorerBeforeRocks)
+	}
+
+	// Simulated crash mid-path (#64): explorer persisted, backup retained, no Rocks / no undo.
+	if h != nil && h.confirmFailPoint == FailPointCrashAfterExplorer {
+		logger.Error("confirm fail-point %s: simulating crash after explorer", FailPointCrashAfterExplorer)
+		out.BackupKept = true
+		return out, fmt.Errorf("injected crash at %s: recovery must rebuild from Rocks", FailPointCrashAfterExplorer)
+	}
+
+	// Rocks WriteBatch failure (#63): prior Rocks head unchanged; compensating explorer undo.
+	if h != nil && h.confirmFailPoint == FailPointRocksWriteBatch {
+		metrics.Global.IncRocksCommitErrors()
+		logger.Error("confirm fail-point %s: injecting Rocks WriteBatch failure", FailPointRocksWriteBatch)
+		if undoErr := h.blockchain.UndoLastConfirmedBlock(out.Block, moved, stateBackup); undoErr != nil {
+			logger.Error("rocks WriteBatch fail-point rollback also failed: %v", undoErr)
+		}
+		out.BackupKept = false
+		return out, fmt.Errorf("rocks WriteBatch failed after confirm: injected at %s", FailPointRocksWriteBatch)
 	}
 
 	if err := h.commitBlockToRocks(out.Block, moved, out.Block.StateRoot); err != nil {

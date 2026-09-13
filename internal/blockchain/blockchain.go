@@ -108,6 +108,34 @@ type Blockchain struct {
 	dagCommitAnchor    string
 	// rocksHeadProbe overrides Rocks tip for read-path tip-freeze tests (#57).
 	rocksHeadProbe func() (gatewayHead int64, ok bool)
+	// explorerOnlyConfirm allows AddConfirmedBlock without a Core ledger (peer unit tests #61–#66).
+	explorerOnlyConfirm bool
+	// peerConfirmInject injects peer-confirm failures before durable Rocks (#61).
+	peerConfirmInject PeerConfirmInject
+}
+
+// PeerConfirmInject names injectable peer AddConfirmedBlock failure sites (#61).
+type PeerConfirmInject string
+
+const (
+	// PeerInjectNone disables injection.
+	PeerInjectNone PeerConfirmInject = ""
+	// PeerInjectExplorerWrite fails after in-memory explorer apply, before chain.json persist.
+	PeerInjectExplorerWrite PeerConfirmInject = "explorer_write"
+)
+
+// SetExplorerOnlyConfirm allows peer confirm without Core ledger (unit tests).
+func (bc *Blockchain) SetExplorerOnlyConfirm(ok bool) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	bc.explorerOnlyConfirm = ok
+}
+
+// SetPeerConfirmInject arms a peer-confirm failure injection point (tests / #61).
+func (bc *Blockchain) SetPeerConfirmInject(p PeerConfirmInject) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	bc.peerConfirmInject = p
 }
 
 // NewBlockchain creates a new blockchain instance
@@ -655,8 +683,13 @@ func parseFee(fee string) int64 {
 func (bc *Blockchain) applyConfirmedTransactions(txs []*Transaction) (backupPath string, err error) {
 	bc.mu.RLock()
 	ledger := bc.ledger
+	explorerOnly := bc.explorerOnlyConfirm
 	bc.mu.RUnlock()
 	if ledger == nil {
+		if explorerOnly {
+			// Peer unit tests: stage explorer views without Core apply (#61–#66).
+			return "", nil
+		}
 		return "", fmt.Errorf("core ledger unavailable")
 	}
 	statePath := ledger.StateFilePath()
@@ -1225,8 +1258,21 @@ func (bc *Blockchain) AddConfirmedBlock(block BlockRecord, txs []*Transaction) (
 	bc.pendingBlock = newPending
 
 	bc.blockHistory = append(bc.blockHistory, block)
+
+	// Injected explorer write failure (#61): undo in-memory tip; never leave a half tip.
+	if bc.peerConfirmInject == PeerInjectExplorerWrite {
+		if bc.ledger != nil && backupPath != "" {
+			_ = copyFile(backupPath, bc.ledger.StateFilePath())
+		}
+		bc.undoExplorerConfirmLocked(block, moved, "mempool")
+		if backupPath != "" {
+			_ = os.Remove(backupPath)
+		}
+		return false, "", fmt.Errorf("explorer write failed: injected failure (no half tip)")
+	}
+
 	if err := bc.persistChain(); err != nil {
-		// Shared rollback: restore Core backup + undo explorer; do not leave half tip (#60).
+		// Shared rollback: restore Core backup + undo explorer; do not leave half tip (#60/#62).
 		if bc.ledger != nil && backupPath != "" {
 			_ = copyFile(backupPath, bc.ledger.StateFilePath())
 		}

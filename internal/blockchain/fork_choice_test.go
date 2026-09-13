@@ -1,6 +1,9 @@
 package blockchain
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestPreferBlockByL2Yes(t *testing.T) {
 	a := BlockRecord{BlockNumber: 1, BlockHash: "aaa", L2Yes: 2}
@@ -18,5 +21,18 @@ func TestPreferBlockByHashTiebreak(t *testing.T) {
 	b := BlockRecord{BlockNumber: 1, BlockHash: "zzz", L2Yes: 3}
 	if !PreferBlock(a, b) {
 		t.Fatal("expected higher hash preferred")
+	}
+}
+
+func TestIsForkConflict(t *testing.T) {
+	if !IsForkConflict(ErrForkConflict) {
+		t.Fatal("bare ErrForkConflict")
+	}
+	wrapped := fmt.Errorf("%w at height 1: keeping local", ErrForkConflict)
+	if !IsForkConflict(wrapped) {
+		t.Fatal("wrapped ErrForkConflict")
+	}
+	if IsForkConflict(fmt.Errorf("other")) {
+		t.Fatal("non-fork error")
 	}
 }

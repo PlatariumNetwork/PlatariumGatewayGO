@@ -1,9 +1,17 @@
 package blockchain
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrForkConflict is returned when a peer block conflicts at an existing height.
 var ErrForkConflict = fmt.Errorf("fork conflict")
+
+// IsForkConflict reports whether err is or wraps ErrForkConflict (#66).
+func IsForkConflict(err error) bool {
+	return errors.Is(err, ErrForkConflict)
+}
 
 // countYes returns the number of true votes in a vote map.
 func countYes(votes map[string]bool) int {
