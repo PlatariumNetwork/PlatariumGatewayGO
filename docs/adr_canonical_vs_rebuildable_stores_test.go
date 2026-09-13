@@ -14,6 +14,8 @@ func TestADRCanonicalVsRebuildableStores(t *testing.T) {
 		"TASK-033",
 		"COMMITTED",
 		"fail-closed",
+		"Crash recovery",
+		"tip leading Rocks",
 	}
 	for _, n := range needles {
 		if !strings.Contains(body, n) {
@@ -25,5 +27,8 @@ func TestADRCanonicalVsRebuildableStores(t *testing.T) {
 	}
 	if !strings.Contains(body, "failure table") && !strings.Contains(body, "finalize contract") {
 		t.Fatal("ADR must point at Core finalize failure table")
+	}
+	if !strings.Contains(body, "rebuild") || !strings.Contains(body, "from Rocks") {
+		t.Fatal("ADR crash recovery must require rebuild from Rocks")
 	}
 }

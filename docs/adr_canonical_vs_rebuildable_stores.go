@@ -66,6 +66,8 @@ Canonical: Core RocksDB tip + accounts after COMMITTED finalize.
 Rebuildable: chain.json, explorer caches, state_file JSON staging.
 Boundary: Core finalize phases; Gateway fail-closed on Core error.
 Invariant: committed B ↔ state after B (height+hash pairing).
+Crash recovery: rebuild explorer/cache from Rocks; do not serve tip leading Rocks;
+partial explorer writes without Core COMMITTED are discarded/frozen on recovery.
 Flag matrix: internal/handlers/lab_endpoints.go (TASK-015).
 Core failure table: PlatariumCore TASK-033 finalize contract docs.
 `

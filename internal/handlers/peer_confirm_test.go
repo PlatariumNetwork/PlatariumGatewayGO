@@ -149,8 +149,10 @@ func TestPeerConfirmRocksWriteBatchFailureKeepsPriorHead(t *testing.T) {
 	}
 }
 
-// Issue #64/#81: peer ApplyPeerConfirmedBlock crash mid-path (explorer/persist done, Rocks not
-// committed) → restart (LoadChainFile + Rocks SoT tip-freeze) leaves recoverable non-divergent tip.
+// Issue #64/#81/#82: peer ApplyPeerConfirmedBlock crash mid-path (explorer/persist done, Rocks not
+// committed) → process restart (LoadChainFile + SyncFromRocksHead + Rocks SoT tip-freeze) leaves a
+// recoverable non-divergent tip per ADR (canonical head matches Rocks; leading chain.json tip
+// is not served as canonical). Distinct from in-process FailPointAfterExplorerBeforeRocks undo.
 func TestPeerConfirmCrashMidPathRecovery(t *testing.T) {
 	dir := t.TempDir()
 	chainPath := filepath.Join(dir, "chain.json")
@@ -176,27 +178,37 @@ func TestPeerConfirmCrashMidPathRecovery(t *testing.T) {
 	if added {
 		t.Fatal("crash mid-path must not report durable add")
 	}
-	// Explorer tip was written to chain.json (rebuildable cache ahead of Rocks).
+	// Explorer tip was written to chain.json (rebuildable cache ahead of Rocks) — no Rocks commit.
 	if len(bc.GetBlockHistory()) != 1 {
 		t.Fatalf("pre-crash explorer tip missing: %d", len(bc.GetBlockHistory()))
+	}
+	if bc.HeadBlockNumber() != 0 {
+		t.Fatalf("pre-crash in-process explorer head=%d want 0 (before Rocks SoT probe)", bc.HeadBlockNumber())
 	}
 	if _, statErr := os.Stat(chainPath); statErr != nil {
 		t.Fatalf("chain.json missing after crash mid-path: %v", statErr)
 	}
+	rocksHead := int64(-1) // no committed Rocks tip
+	if !blockchain.TipLeadsRocks(0, rocksHead, true) {
+		t.Fatal("pre-restart: explorer tip must lead empty Rocks (divergent cache)")
+	}
 
-	// Restart: reload chain.json cache, Rocks SoT still at genesis → freeze leading tip (ADR).
+	// Restart: new process loads chain.json cache; Rocks SoT still empty → freeze leading tip (ADR).
 	restarted := blockchain.NewBlockchain()
+	restarted.SetRocksHeadProbe(func() (int64, bool) { return rocksHead, true })
 	if err := restarted.LoadChainFile(chainPath); err != nil {
 		t.Fatal(err)
 	}
-	// SyncFromRocksHead with empty Rocks keeps explorer cache; tip-freeze must still refuse to serve it.
+	// SyncFromRocksHead with empty/disabled Rocks keeps explorer cache on disk; tip-freeze must
+	// still refuse to serve the leading tip as canonical.
 	if err := restarted.SyncFromRocksHead(); err != nil {
 		t.Fatal(err)
 	}
-	rocksHead := int64(-1) // no committed Rocks tip
-	restarted.SetRocksHeadProbe(func() (int64, bool) { return rocksHead, true })
 	if got := restarted.HeadBlockNumber(); got != rocksHead {
 		t.Fatalf("after restart served head=%d want Rocks %d (non-divergent)", got, rocksHead)
+	}
+	if got := blockchain.CanonicalHeadNumber(0, rocksHead, true); got != rocksHead {
+		t.Fatalf("CanonicalHeadNumber=%d want Rocks %d", got, rocksHead)
 	}
 	if hist := restarted.GetBlockHistory(); len(hist) != 0 {
 		t.Fatalf("leading explorer tip must not be served after crash recovery: %+v", hist)
