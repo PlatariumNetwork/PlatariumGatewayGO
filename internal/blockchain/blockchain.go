@@ -103,9 +103,12 @@ type Blockchain struct {
 	blockHistory       []BlockRecord
 	totalFeesCollected int64 // total fees from all confirmed TX
 	chainFile          string
-	confirmedHashes    map[string]bool // hashes already in a confirmed block (guards re-admission)
-	dagCommitDigests   []string        // last DAG batch-commit order for L2 apply
-	dagCommitAnchor    string
+	// durableHead is the highest block number loaded or saved in chain.json.
+	// A restart must not persist a lower head over that snapshot.
+	durableHead      int64
+	confirmedHashes  map[string]bool // hashes already in a confirmed block (guards re-admission)
+	dagCommitDigests []string        // last DAG batch-commit order for L2 apply
+	dagCommitAnchor  string
 	// rocksHeadProbe overrides Rocks tip for read-path tip-freeze tests (#57).
 	rocksHeadProbe func() (gatewayHead int64, ok bool)
 	// explorerOnlyConfirm allows AddConfirmedBlock without a Core ledger (peer unit tests #61–#66).
@@ -147,6 +150,7 @@ func NewBlockchain() *Blockchain {
 		addressTxs:      make(map[string][]*Transaction),
 		blockHistory:    make([]BlockRecord, 0),
 		confirmedHashes: make(map[string]bool),
+		durableHead:     -1,
 	}
 }
 
@@ -283,9 +287,11 @@ type ConfirmedTxRef struct {
 // (newest block first). Prefer this over the explorer tx map when the index is still
 // hydrating from RocksDB after restart.
 func (bc *Blockchain) ConfirmedTxRefsNewestFirst() []ConfirmedTxRef {
-	bc.mu.RLock()
+	bc.mu.Lock()
+	bc.attachConfirmedTxsToHistoryLocked()
 	blocks := append([]BlockRecord(nil), bc.blockHistory...)
-	bc.mu.RUnlock()
+	extras := bc.indexTxsMissingFromHistoryLocked(blocks)
+	bc.mu.Unlock()
 	if len(blocks) == 0 && bc.RocksEnabled() {
 		if fromRocks, err := bc.listBlockHistoryFromRocks(); err == nil && len(fromRocks) > 0 {
 			blocks = fromRocks
@@ -293,14 +299,15 @@ func (bc *Blockchain) ConfirmedTxRefsNewestFirst() []ConfirmedTxRef {
 			bc.mu.Lock()
 			if len(bc.blockHistory) == 0 {
 				bc.blockHistory = append([]BlockRecord(nil), fromRocks...)
-				if head := int64(len(fromRocks)); head > bc.blockCounter {
-					bc.blockCounter = head
+				if head := historyHead(fromRocks); head+1 > bc.blockCounter {
+					bc.blockCounter = head + 1
 				}
+				bc.noteDurableHeadLocked()
 			}
 			bc.mu.Unlock()
 		}
 	}
-	if len(blocks) == 0 {
+	if len(blocks) == 0 && len(extras) == 0 {
 		return nil
 	}
 	sort.Slice(blocks, func(i, j int) bool {
@@ -322,7 +329,31 @@ func (bc *Blockchain) ConfirmedTxRefsNewestFirst() []ConfirmedTxRef {
 			})
 		}
 	}
-	return out
+	var newestTs int64
+	if len(out) > 0 {
+		newestTs = out[0].Timestamp
+	}
+	front := make([]ConfirmedTxRef, 0)
+	back := make([]ConfirmedTxRef, 0)
+	for _, extra := range extras {
+		if extra.Hash == "" || seen[extra.Hash] {
+			continue
+		}
+		seen[extra.Hash] = true
+		if extra.Timestamp >= newestTs {
+			front = append(front, extra)
+		} else {
+			back = append(back, extra)
+		}
+	}
+	sort.Slice(front, func(i, j int) bool {
+		if front[i].Timestamp == front[j].Timestamp {
+			return front[i].BlockNumber > front[j].BlockNumber
+		}
+		return front[i].Timestamp > front[j].Timestamp
+	})
+	out = append(front, out...)
+	return append(out, back...)
 }
 
 // GetTransactionsByAddress returns transactions where address is sender or receiver

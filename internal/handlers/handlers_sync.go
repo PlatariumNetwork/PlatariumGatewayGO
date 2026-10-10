@@ -145,6 +145,15 @@ func (h *Handler) hydrateExplorerIndexFromRocksIfNeeded() {
 	if head == 0 && expected == 0 {
 		return
 	}
+	// chain.json is ahead of Rocks. Keep it and write it back so the next
+	// restart still has the deals. Do not hydrate over that cache.
+	if mem, rocksHead, leads := h.blockchain.ChainCacheLeadsRocks(); leads {
+		logger.Info("Explorer keeps chain cache head=%d ahead of Rocks head=%d", mem, rocksHead)
+		if err := h.blockchain.PersistChainSnapshot(); err != nil {
+			logger.Warn("Persist leading chain cache failed: %v", err)
+		}
+		return
+	}
 
 	needsHydrate := head > 0 && (indexed < expected || indexed == 0 || historyLen == 0)
 	if !needsHydrate && head > 0 && indexed == expected && expected > 0 {

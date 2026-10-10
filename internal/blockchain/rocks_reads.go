@@ -32,11 +32,29 @@ func (bc *Blockchain) SetRocksStore(rocks *core.RocksStoreClient) {
 func (bc *Blockchain) SyncFromRocksHead() error {
 	rocks := bc.rocksClient()
 	if rocks == nil || !rocks.Enabled() {
+		bc.mu.Lock()
+		bc.attachConfirmedTxsToHistoryLocked()
+		bc.mu.Unlock()
 		return nil
 	}
 	head, err := rocks.RocksGetHead()
 	if err != nil {
 		return err
+	}
+	bc.mu.Lock()
+	bc.attachConfirmedTxsToHistoryLocked()
+	local := historyHead(bc.blockHistory)
+	bc.mu.Unlock()
+	// Rocks empty, or chain.json already holds a newer confirmed head.
+	// Do not replace that cache with an older Rocks snapshot: a restart
+	// would hide deals the wallet still reads from the address index.
+	if head == 0 || local > core.RocksHeightToGatewayBlock(head) {
+		bc.mu.Lock()
+		if local >= 0 && bc.blockCounter <= local {
+			bc.blockCounter = local + 1
+		}
+		bc.mu.Unlock()
+		return nil
 	}
 	history, err := bc.listBlockHistoryFromRocks()
 	if err != nil {
@@ -44,15 +62,12 @@ func (bc *Blockchain) SyncFromRocksHead() error {
 	}
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
-	if head == 0 {
-		// Rocks empty — keep chain.json / in-memory history if present.
-		return nil
-	}
 	// Next gateway block number equals Rocks head (0-based next after last imported height).
 	bc.blockCounter = int64(head)
 	if len(history) > 0 {
 		bc.blockHistory = history
 	}
+	bc.attachConfirmedTxsToHistoryLocked()
 	return nil
 }
 
@@ -87,16 +102,32 @@ func (bc *Blockchain) HydrateExplorerIndexFromRocks() (int, error) {
 	}
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
-	bc.transactions = make(map[string]*Transaction, len(txs))
-	bc.addressTxs = make(map[string][]*Transaction)
-	bc.confirmedHashes = make(map[string]bool, len(txs))
+	if len(txs) == 0 {
+		bc.attachConfirmedTxsToHistoryLocked()
+		return len(bc.transactions), nil
+	}
+	if bc.transactions == nil {
+		bc.transactions = make(map[string]*Transaction, len(txs))
+	}
+	if bc.confirmedHashes == nil {
+		bc.confirmedHashes = make(map[string]bool, len(txs))
+	}
 	for _, tx := range txs {
 		if tx == nil || tx.Hash == "" {
 			continue
 		}
+		if prev := bc.transactions[tx.Hash]; prev != nil && prev.BlockNumber > tx.BlockNumber {
+			tx = prev
+		}
 		bc.transactions[tx.Hash] = tx
 		bc.confirmedHashes[tx.Hash] = true
 		bc.lastTx = tx
+	}
+	bc.addressTxs = make(map[string][]*Transaction, len(bc.transactions))
+	for _, tx := range bc.transactions {
+		if tx == nil || tx.Hash == "" {
+			continue
+		}
 		if tx.From != "" {
 			bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
 		}
@@ -104,6 +135,7 @@ func (bc *Blockchain) HydrateExplorerIndexFromRocks() (int, error) {
 			bc.addressTxs[tx.To] = append(bc.addressTxs[tx.To], tx)
 		}
 	}
+	bc.attachConfirmedTxsToHistoryLocked()
 	return len(bc.transactions), nil
 }
 

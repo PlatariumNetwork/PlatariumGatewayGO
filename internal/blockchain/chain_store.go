@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -71,6 +72,8 @@ func (bc *Blockchain) LoadChainFile(path string) error {
 		bc.addressTxs[tx.From] = append(bc.addressTxs[tx.From], tx)
 		bc.addressTxs[tx.To] = append(bc.addressTxs[tx.To], tx)
 	}
+	bc.attachConfirmedTxsToHistoryLocked()
+	bc.noteDurableHeadLocked()
 	bc.chainFile = path
 	return nil
 }
@@ -115,11 +118,21 @@ func (bc *Blockchain) persistChain() error {
 	for _, tx := range bc.transactions {
 		file.Transactions = append(file.Transactions, tx)
 	}
+	nextHead := historyHead(file.Blocks)
+	if bc.durableHead >= 0 && nextHead < bc.durableHead {
+		return fmt.Errorf("refuse to shrink chain head %d to %d", bc.durableHead, nextHead)
+	}
 	raw, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal chain file: %w", err)
 	}
-	return atomicWriteFile(path, raw)
+	if err := atomicWriteFile(path, raw); err != nil {
+		return err
+	}
+	if nextHead > bc.durableHead {
+		bc.durableHead = nextHead
+	}
+	return nil
 }
 
 func atomicWriteFile(path string, data []byte) error {
@@ -134,4 +147,162 @@ func atomicWriteFile(path string, data []byte) error {
 		return fmt.Errorf("rename chain file: %w", err)
 	}
 	return nil
+}
+
+func historyHead(blocks []BlockRecord) int64 {
+	max := int64(-1)
+	for _, block := range blocks {
+		if block.BlockNumber > max {
+			max = block.BlockNumber
+		}
+	}
+	return max
+}
+
+func (bc *Blockchain) noteDurableHeadLocked() {
+	if h := historyHead(bc.blockHistory); h > bc.durableHead {
+		bc.durableHead = h
+	}
+}
+
+// MemoryHeadBlockNumber is the highest block in the explorer cache, ignoring Rocks tip-freeze.
+func (bc *Blockchain) MemoryHeadBlockNumber() int64 {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return historyHead(bc.blockHistory)
+}
+
+// ChainCacheLeadsRocks reports that the explorer cache head is newer than Rocks.
+func (bc *Blockchain) ChainCacheLeadsRocks() (mem int64, rocks int64, leads bool) {
+	mem = bc.MemoryHeadBlockNumber()
+	rocksHead, ok := bc.headBlockNumberFromRocks()
+	if !ok {
+		return mem, -1, false
+	}
+	return mem, rocksHead, mem > rocksHead
+}
+
+// attachConfirmedTxsToHistoryLocked rebuilds block records for confirmed txs whose
+// block was dropped when an older Rocks snapshot replaced the explorer cache.
+// Caller must hold bc.mu.
+func (bc *Blockchain) attachConfirmedTxsToHistoryLocked() {
+	index := make(map[int64]int, len(bc.blockHistory))
+	for i := range bc.blockHistory {
+		index[bc.blockHistory[i].BlockNumber] = i
+	}
+	type built struct {
+		hashes []string
+		ts     int64
+		fees   int64
+	}
+	missing := map[int64]*built{}
+	for _, tx := range bc.transactions {
+		if tx == nil || tx.Hash == "" || tx.BlockNumber <= 0 {
+			continue
+		}
+		if i, ok := index[tx.BlockNumber]; ok {
+			found := false
+			for _, hash := range bc.blockHistory[i].TxHashes {
+				if hash == tx.Hash {
+					found = true
+					break
+				}
+			}
+			if !found {
+				bc.blockHistory[i].TxHashes = append(bc.blockHistory[i].TxHashes, tx.Hash)
+				bc.blockHistory[i].TxCount = len(bc.blockHistory[i].TxHashes)
+			}
+			continue
+		}
+		row := missing[tx.BlockNumber]
+		if row == nil {
+			row = &built{}
+			missing[tx.BlockNumber] = row
+		}
+		row.hashes = append(row.hashes, tx.Hash)
+		if tx.Timestamp > row.ts {
+			row.ts = tx.Timestamp
+		}
+		row.fees += int64(tx.FeeUplp)
+	}
+	if len(missing) == 0 {
+		return
+	}
+	nums := make([]int64, 0, len(missing))
+	for n := range missing {
+		nums = append(nums, n)
+	}
+	sort.Slice(nums, func(i, j int) bool { return nums[i] < nums[j] })
+	for _, n := range nums {
+		row := missing[n]
+		bc.blockHistory = append(bc.blockHistory, BlockRecord{
+			BlockNumber: n,
+			Timestamp:   row.ts,
+			TxHashes:    row.hashes,
+			TxCount:     len(row.hashes),
+			TotalFees:   row.fees,
+		})
+	}
+	sort.Slice(bc.blockHistory, func(i, j int) bool {
+		return bc.blockHistory[i].BlockNumber < bc.blockHistory[j].BlockNumber
+	})
+	if h := historyHead(bc.blockHistory); h >= 0 && bc.blockCounter <= h {
+		bc.blockCounter = h + 1
+	}
+	bc.noteDurableHeadLocked()
+}
+
+func isIndexedDeal(tx *Transaction) bool {
+	if tx == nil {
+		return false
+	}
+	return tx.Purpose == "deal" || tx.Type == "escrow_lock"
+}
+
+// indexTxsMissingFromHistoryLocked returns deal locks (and any confirmed tx that
+// still has no block row) so the explorer list matches the address index.
+// Caller must hold bc.mu.
+func (bc *Blockchain) indexTxsMissingFromHistoryLocked(blocks []BlockRecord) []ConfirmedTxRef {
+	inBlock := make(map[string]bool)
+	head := historyHead(blocks)
+	for _, block := range blocks {
+		for _, hash := range block.TxHashes {
+			if hash != "" {
+				inBlock[hash] = true
+			}
+		}
+	}
+	skip := make(map[string]bool)
+	for _, tx := range bc.mempool {
+		if tx != nil && tx.Hash != "" {
+			skip[tx.Hash] = true
+		}
+	}
+	for _, tx := range bc.pendingBlock {
+		if tx != nil && tx.Hash != "" {
+			skip[tx.Hash] = true
+		}
+	}
+	out := make([]ConfirmedTxRef, 0)
+	for _, tx := range bc.transactions {
+		if tx == nil || tx.Hash == "" || skip[tx.Hash] || inBlock[tx.Hash] {
+			continue
+		}
+		if tx.BlockNumber <= 0 && !isIndexedDeal(tx) {
+			continue
+		}
+		blockNumber := tx.BlockNumber
+		if blockNumber <= 0 {
+			blockNumber = head
+		}
+		if blockNumber < 0 {
+			blockNumber = 0
+		}
+		out = append(out, ConfirmedTxRef{
+			Hash:        tx.Hash,
+			BlockNumber: blockNumber,
+			Timestamp:   tx.Timestamp,
+		})
+	}
+	return out
 }
