@@ -17,6 +17,18 @@ func TestMapProtocolOutcome(t *testing.T) {
 	}
 }
 
+func TestPurposeDealConstant(t *testing.T) {
+	if PurposeDeal != "deal" {
+		t.Fatalf("purpose %q", PurposeDeal)
+	}
+	if DefaultPurpose("") != PurposeContact || DefaultPurpose("  ") != PurposeContact {
+		t.Fatal("blank purpose must stay contact")
+	}
+	if DefaultPurpose(PurposeDeal) != PurposeDeal {
+		t.Fatal("deal must be explicit")
+	}
+}
+
 func TestBuildLockPayload(t *testing.T) {
 	p := BuildLockPayload("eid", "A", "B", "", "rh", 100, 99, 1)
 	if p.TxKind != TxKindLock || p.Purpose != PurposeContact || p.Amount != 100 {

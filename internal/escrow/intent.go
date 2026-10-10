@@ -25,9 +25,7 @@ func BuildLockPayload(
 	escrowID, creator, beneficiary, purpose, rulesHash string,
 	amount uint64, expiresAt int64, nonce uint64,
 ) LockPayload {
-	if purpose == "" {
-		purpose = PurposeContact
-	}
+	purpose = DefaultPurpose(purpose)
 	return LockPayload{
 		TxKind:      TxKindLock,
 		EscrowID:    escrowID,

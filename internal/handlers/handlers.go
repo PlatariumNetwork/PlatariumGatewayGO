@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -21,6 +22,7 @@ import (
 	"platarium-gateway-go/internal/channelidentity"
 	"platarium-gateway-go/internal/contacteconomy"
 	"platarium-gateway-go/internal/core"
+	"platarium-gateway-go/internal/deals"
 	"platarium-gateway-go/internal/faucet"
 	"platarium-gateway-go/internal/logger"
 	"platarium-gateway-go/internal/nodes"
@@ -88,6 +90,8 @@ type Handler struct {
 
 	contactEconomy  *contacteconomy.Store
 	contactRate     *ratelimit.Limiter
+	dealBook        *deals.Book
+	dealStateFile   string
 	channelIdentity *channelidentity.Store
 
 	autoBlockMu sync.Mutex
@@ -1222,7 +1226,19 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	if xp == "" {
 		xp = blockchain.TokenXPFromMap(tokens)
 	}
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
+	jsonResponse(w, http.StatusOK, balancePayload(address, account, tokens, xp))
+}
+
+func balancePayload(address string, account *core.AccountQuery, tokens map[string]string, xp string) map[string]interface{} {
+	locked := account.LockedUplp
+	if locked == "" {
+		locked = "0"
+	}
+	receivable := account.ReceivableUplp
+	if receivable == "" {
+		receivable = "0"
+	}
+	return map[string]interface{}{
 		"address":            address,
 		"balance":            account.Balance,
 		"nonce":              account.Nonce,
@@ -1231,7 +1247,9 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		"asset":              account.Asset,
 		"tokens":             tokens,
 		"xp":                 xp,
-	})
+		"locked_uplp":        locked,
+		"receivable_uplp":    receivable,
+	}
 }
 
 // AllocateNonce reserves the next sender nonce under the admit mutex.
@@ -1655,7 +1673,33 @@ func (h *Handler) GetTransactions(w http.ResponseWriter, r *http.Request) {
 	address := vars["address"]
 
 	txs := h.blockchain.GetTransactionsByAddress(address)
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"transactions": txs})
+	listed := make([]*blockchain.Transaction, 0, len(txs))
+	for _, tx := range txs {
+		listed = append(listed, presentListedTx(tx))
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"transactions": listed})
+}
+
+// presentListedTx copies a transaction so the address list shows native PLP as asset PLP.
+func presentListedTx(tx *blockchain.Transaction) *blockchain.Transaction {
+	if tx == nil {
+		return nil
+	}
+	cp := *tx
+	cp.Asset = listedAsset(cp.Asset, cp.AssetType)
+	return &cp
+}
+
+func listedAsset(asset, assetType string) string {
+	a := strings.TrimSpace(asset)
+	if strings.HasPrefix(a, "Token:") {
+		return a
+	}
+	kind := strings.ToLower(strings.TrimSpace(assetType))
+	if kind == "native" && (a == "" || strings.EqualFold(a, "NATIVE")) {
+		return "PLP"
+	}
+	return a
 }
 
 func (h *Handler) SendTransaction(w http.ResponseWriter, r *http.Request) {
@@ -1947,7 +1991,7 @@ func (h *Handler) GetAllTransactions(w http.ResponseWriter, r *http.Request) {
 		limit = 100
 	}
 
-	if strings.EqualFold(r.URL.Query().Get("status"), "confirmed") {
+	if transactionsUseConfirmedDefault(r.URL.Query()) {
 		h.serveConfirmedTransactionsPage(w, page, limit)
 		return
 	}
@@ -2116,9 +2160,50 @@ func txMapTimestamp(m map[string]interface{}) int64 {
 }
 
 // GetBlockHistory returns block history for analytics
+func transactionsUseConfirmedDefault(q url.Values) bool {
+	if q.Get("mempool") == "1" || q.Get("pending") == "1" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(q.Get("status"))) {
+	case "all", "pending", "mempool":
+		return false
+	default:
+		return true
+	}
+}
+
 func (h *Handler) GetBlockHistory(w http.ResponseWriter, r *http.Request) {
-	blocks := h.blockchain.GetBlockHistory()
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"blocks": blocks})
+	blocks := blockchain.PageBlocks(h.blockchain.GetBlockHistory(), blockPageFromQuery(r))
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"blocks": blocks, "count": len(blocks)})
+}
+
+func blockPageFromQuery(r *http.Request) blockchain.BlockPageQuery {
+	q := r.URL.Query()
+	page := blockchain.BlockPageQuery{Limit: blockchain.DefaultBlockPageLimit, Page: 1}
+	if q.Get("full") == "1" || strings.EqualFold(q.Get("full"), "true") {
+		page.Full = true
+	}
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			page.Limit = n
+		}
+	}
+	if v := q.Get("page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			page.Page = n
+		}
+	}
+	if v := q.Get("from"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			page.From = &n
+		}
+	}
+	if v := q.Get("to"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			page.To = &n
+		}
+	}
+	return page
 }
 
 // GetBlock returns one block by number with full transactions and consensus log (for block detail page).

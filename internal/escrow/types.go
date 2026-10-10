@@ -3,6 +3,8 @@
 // Gateway does not decide splits; it routes protocol outcomes to Core outcome keys.
 package escrow
 
+import "strings"
+
 const (
 	TxKindLock   = "escrow_lock"
 	TxKindSettle = "escrow_settle"
@@ -10,6 +12,7 @@ const (
 	TxKindCancel = "escrow_cancel"
 
 	PurposeContact = "contact"
+	PurposeDeal    = "deal"
 
 	OutcomeAccept  = "accept"
 	OutcomeTimeout = "timeout"
@@ -57,6 +60,14 @@ type LockPayload struct {
 	RulesHash   string `json:"rulesHash,omitempty"`
 	ExpiresAt   int64  `json:"expiresAt"`
 	Nonce       uint64 `json:"nonce"`
+}
+
+// DefaultPurpose keeps a blank tag on the contact path. Deal callers must pass PurposeDeal.
+func DefaultPurpose(purpose string) string {
+	if strings.TrimSpace(purpose) == "" {
+		return PurposeContact
+	}
+	return purpose
 }
 
 // MapProtocolOutcome converts contact-protocol outcome strings to Core rules keys.

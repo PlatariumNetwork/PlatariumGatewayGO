@@ -18,6 +18,8 @@ type AccountQuery struct {
 	Nonce            uint64            `json:"nonce"`
 	Tokens           map[string]string `json:"tokens,omitempty"`
 	Xp               string            `json:"xp,omitempty"`
+	LockedUplp       string            `json:"locked_uplp,omitempty"`
+	ReceivableUplp   string            `json:"receivable_uplp,omitempty"`
 }
 
 // ApplyTxResult is the parsed state-apply-tx response.

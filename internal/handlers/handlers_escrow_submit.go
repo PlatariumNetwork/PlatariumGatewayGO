@@ -49,10 +49,7 @@ func (h *Handler) SubmitEscrowLock(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "escrowId, beneficiary, amountUplp required"})
 		return
 	}
-	purpose := body.Purpose
-	if purpose == "" {
-		purpose = escrow.PurposeContact
-	}
+	purpose := escrow.DefaultPurpose(body.Purpose)
 	from := strings.TrimSpace(body.From)
 	if from == "" {
 		keys, err := h.rustCore.GenerateKeys(body.Mnemonic, body.Alphanumeric, 0)
@@ -189,10 +186,7 @@ func (h *Handler) SubmitEscrowSettle(w http.ResponseWriter, r *http.Request) {
 		}
 		nonce = n
 	}
-	purpose := body.Purpose
-	if purpose == "" {
-		purpose = escrow.PurposeContact
-	}
+	purpose := escrow.DefaultPurpose(body.Purpose)
 	opts := &core.EscrowSignOpts{
 		TxKind:           escrow.TxKindSettle,
 		EscrowID:         body.EscrowID,
