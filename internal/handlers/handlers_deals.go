@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -12,6 +13,22 @@ import (
 
 	"github.com/gorilla/mux"
 )
+
+// requireDealGuarantor rejects a deal lock whose node is not this gateway's operator wallet.
+// Other transaction kinds are left unchanged. The caller cannot choose the guarantor.
+func requireDealGuarantor(h *Handler, tx *blockchain.Transaction) error {
+	if tx == nil || tx.Purpose != escrow.PurposeDeal || tx.Type != escrow.TxKindLock {
+		return nil
+	}
+	node := strings.TrimSpace(h.operatorWallet)
+	if node == "" {
+		return fmt.Errorf("this node has no guarantor address")
+	}
+	if !strings.EqualFold(strings.TrimSpace(tx.SettleNode), node) {
+		return fmt.Errorf("guarantor is assigned by the node")
+	}
+	return nil
+}
 
 // signedDealAdmit is the mempool handoff for an already-signed deal transaction.
 // Tests replace it so admission can be observed without a Core process.
@@ -70,8 +87,8 @@ func (h *Handler) SubmitDealLock(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "signed lock must use purpose deal"})
 		return
 	}
-	if strings.TrimSpace(tx.SettleNode) == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "deal lock requires a node"})
+	if err := requireDealGuarantor(h, tx); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	if tx.Asset != "PLP" {

@@ -1871,6 +1871,10 @@ func (h *Handler) submitCoreSignedTx(w http.ResponseWriter, txData map[string]in
 		})
 		return
 	}
+	if err := requireDealGuarantor(h, tx); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if tx.Value == "" && tx.AmountUplp > 0 {
 		tx.Value = strconv.FormatUint(tx.AmountUplp, 10)
 	}

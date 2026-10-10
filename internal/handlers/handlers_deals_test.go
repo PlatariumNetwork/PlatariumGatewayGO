@@ -95,6 +95,11 @@ func TestDealLockAdmission(t *testing.T) {
 	if w := post(`{"transaction":` + raw + `}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("asset %d", w.Code)
 	}
+	h.operatorWallet = "node-1"
+	raw = dealTxJSON(escrow.TxKindLock, escrow.PurposeDeal, "PLP", "other-node", "")
+	if w := post(`{"transaction":` + raw + `}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("foreign guarantor %d %s", w.Code, w.Body.String())
+	}
 	raw = dealTxJSON(escrow.TxKindLock, escrow.PurposeDeal, "PLP", "node-1", "")
 	w := post(`{"transaction":` + raw + `}`)
 	if w.Code != http.StatusOK {
