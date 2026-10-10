@@ -113,6 +113,8 @@ The gateway persists authoritative balances in a JSON state file managed by Core
 | `PLATARIUM_STATE_FILE` | Path to Core state JSON (default: `data/core-state.json`) — **not canonical** for confirmed explorer reads when RocksDB is populated |
 | `PLATARIUM_CHAIN_FILE` | Explorer restart cache (blocks + txs JSON). Always written on L2 confirm; RocksDB remains canonical when enabled |
 | `PLATARIUM_ROCKSDB_PATH` | Core RocksDB directory (default: `{state_dir}/rocksdb`). Canonical TX/block/account store |
+
+Split-node data directories live under `node0/data` and `node1/data`. Copy [`start.sh.example`](start.sh.example) into the node folder. It cds into that folder and exports `PLATARIUM_STATE_FILE` and `PLATARIUM_ROCKSDB_PATH` as absolute paths under that node's `data/`. `restart-nodes.sh` starts each node only after changing into that folder.
 | `PLATARIUM_CLI_PATH` | Path to `platarium-cli` binary (auto-detected from `../PlatariumCore/target/release/`) |
 
 See [docs/rocksdb-thin-reads.md](docs/rocksdb-thin-reads.md) for thin read and commit behavior.

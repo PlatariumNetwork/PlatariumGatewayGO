@@ -1,8 +1,22 @@
 #!/usr/bin/env bash
 # Restart both melancholy-testnet nodes from their own folders (node0 / node1).
 # Does NOT rebuild — use update-and-restart.sh after git pull.
+# cwd must be the node folder before start.sh. A relative data/ from the repo
+# root opens a new empty store and the live chain looks wiped.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# start_node runs start.sh only after cd into that node folder.
+# RESTART_DRY_RUN=1 prints the cwd and does not launch a process.
+start_node() {
+  local dir="$1"
+  if [[ "${RESTART_DRY_RUN:-}" == "1" ]]; then
+    ( cd "$dir" && pwd )
+    return 0
+  fi
+  # cwd must be the node folder (node0 or node1), never the repo root.
+  ( cd "$dir" && bash ./start.sh )
+}
 
 wait_http() {
   local port="$1"
@@ -20,9 +34,14 @@ wait_http() {
   return 1
 }
 
-bash node0/start.sh
-wait_http 1812 node0 90 || true
-bash node1/start.sh
+start_node node0
+if [[ "${RESTART_DRY_RUN:-}" != "1" ]]; then
+  wait_http 1812 node0 90 || true
+fi
+start_node node1
+if [[ "${RESTART_DRY_RUN:-}" == "1" ]]; then
+  exit 0
+fi
 wait_http 1822 node1 90 || true
 
 echo "=== listeners ==="

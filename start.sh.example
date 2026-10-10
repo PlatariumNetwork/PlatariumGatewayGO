@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Copy this file to node0/start.sh or node1/start.sh and adjust the port.
+# Operators: see README "Split-node data directories".
+# cwd must be this node's folder before launch. Paths are absolute under that node's data/.
+set -euo pipefail
+cd "$(dirname "$0")"
+ROOT="$PWD"
+
+export PLATARIUM_STATE_FILE="$ROOT/data/state.json"
+export PLATARIUM_CHAIN_FILE="$ROOT/data/chain.json"
+export PLATARIUM_ROCKSDB_PATH="$ROOT/data/rocksdb"
+
+mkdir -p "$ROOT/data/rocksdb" "$ROOT/log"
+
+exec ./platarium-gateway -testnet \
+  -port "${GATEWAY_PORT:-1812}" \
+  -ws "${GATEWAY_WS_PORT:-1813}" \
+  -state-file "$PLATARIUM_STATE_FILE"
