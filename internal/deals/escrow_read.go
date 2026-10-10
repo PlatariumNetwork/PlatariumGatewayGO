@@ -52,7 +52,7 @@ func DealsForAddress(rows []CoreEscrow, address string) []CoreEscrow {
 		if row.Purpose != "deal" {
 			continue
 		}
-		if row.Creator == address || row.Beneficiary == address {
+		if strings.EqualFold(row.Creator, address) || strings.EqualFold(row.Beneficiary, address) {
 			out = append(out, row)
 		}
 	}

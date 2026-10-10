@@ -125,6 +125,11 @@ func txFromCoreJSON(raw string) (*Transaction, error) {
 			tx.Hash = h
 		}
 	}
+	if tx.Type == "" {
+		if kind, ok := m["tx_kind"].(string); ok {
+			tx.Type = kind
+		}
+	}
 	if tx.Value == "" && tx.AmountUplp > 0 {
 		tx.Value = strconv.FormatUint(tx.AmountUplp, 10)
 	}
