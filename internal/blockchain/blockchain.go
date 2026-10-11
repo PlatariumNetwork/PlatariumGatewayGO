@@ -287,6 +287,8 @@ type ConfirmedTxRef struct {
 // (newest block first). Prefer this over the explorer tx map when the index is still
 // hydrating from RocksDB after restart.
 func (bc *Blockchain) ConfirmedTxRefsNewestFirst() []ConfirmedTxRef {
+	// Read Rocks head before the write lock. headBlockNumberFromRocks takes RLock.
+	rocksHead, rocksOK := bc.headBlockNumberFromRocks()
 	bc.mu.Lock()
 	bc.attachConfirmedTxsToHistoryLocked()
 	blocks := append([]BlockRecord(nil), bc.blockHistory...)
@@ -316,6 +318,11 @@ func (bc *Blockchain) ConfirmedTxRefsNewestFirst() []ConfirmedTxRef {
 	out := make([]ConfirmedTxRef, 0)
 	seen := make(map[string]bool)
 	for _, block := range blocks {
+		// A block number the detail route will not serve must not appear in the list.
+		// GetBlockByNumber hides anything above the Rocks head (#57).
+		if rocksOK && block.BlockNumber > rocksHead {
+			continue
+		}
 		for i := len(block.TxHashes) - 1; i >= 0; i-- {
 			hash := block.TxHashes[i]
 			if hash == "" || seen[hash] {
@@ -337,6 +344,9 @@ func (bc *Blockchain) ConfirmedTxRefsNewestFirst() []ConfirmedTxRef {
 	back := make([]ConfirmedTxRef, 0)
 	for _, extra := range extras {
 		if extra.Hash == "" || seen[extra.Hash] {
+			continue
+		}
+		if rocksOK && extra.BlockNumber > rocksHead {
 			continue
 		}
 		seen[extra.Hash] = true

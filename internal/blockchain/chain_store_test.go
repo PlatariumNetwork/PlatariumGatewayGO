@@ -118,3 +118,46 @@ func TestLoadRebuildsBlocksAndKeepsDealOnConfirmedList(t *testing.T) {
 		t.Fatalf("shrink err=%v", err)
 	}
 }
+
+func TestConfirmedListHidesBlocksAheadOfRocks(t *testing.T) {
+	bc := NewBlockchain()
+	bc.mu.Lock()
+	bc.blockHistory = []BlockRecord{{
+		BlockNumber: 19302,
+		Timestamp:   1787346877,
+		TxHashes:    []string{"old"},
+		TxCount:     1,
+	}}
+	bc.transactions["old"] = &Transaction{Hash: "old", BlockNumber: 19302, Timestamp: 1787346877}
+	bc.transactions["deal"] = &Transaction{
+		Hash:        "deal",
+		Type:        "escrow_lock",
+		Purpose:     "deal",
+		BlockNumber: 19304,
+		Timestamp:   1791679578,
+	}
+	bc.transactions["send"] = &Transaction{
+		Hash:        "send",
+		Type:        "transfer",
+		BlockNumber: 19304,
+		Timestamp:   1791679500,
+	}
+	bc.mu.Unlock()
+	bc.SetRocksHeadProbe(func() (int64, bool) { return 19302, true })
+
+	refs := bc.ConfirmedTxRefsNewestFirst()
+	for _, ref := range refs {
+		if ref.BlockNumber > 19302 {
+			t.Fatalf("served block %d for %s ahead of rocks head", ref.BlockNumber, ref.Hash)
+		}
+		if ref.Hash == "deal" || ref.Hash == "send" {
+			t.Fatalf("phantom tx %s still on confirmed list as block %d", ref.Hash, ref.BlockNumber)
+		}
+	}
+	if bc.GetBlockByNumber(19304) != nil {
+		t.Fatal("block 19304 must stay unservable above rocks head")
+	}
+	if bc.GetBlockByNumber(19302) == nil {
+		t.Fatal("block 19302 missing")
+	}
+}
