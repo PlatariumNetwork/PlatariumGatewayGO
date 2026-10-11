@@ -118,6 +118,10 @@ func (h *Handler) autoBlockTick() {
 	}
 	defer h.autoBlockMu.Unlock()
 
+	if n := h.blockchain.RequeueUnconfirmedEscrows(); n > 0 {
+		logger.Info("Requeued %d unconfirmed escrow tx(s) into the mempool", n)
+	}
+
 	maxRounds := autoBlockDrainMaxRounds()
 	for round := 0; round < maxRounds; round++ {
 		if len(h.blockchain.GetPendingBlock()) > 0 {

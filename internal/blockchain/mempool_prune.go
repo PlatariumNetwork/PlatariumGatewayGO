@@ -1,6 +1,10 @@
 package blockchain
 
-import "platarium-gateway-go/internal/logger"
+import (
+	"sort"
+
+	"platarium-gateway-go/internal/logger"
+)
 
 // MempoolMaxNonceGap matches PlatariumCore MEMPOOL_MAX_NONCE_GAP — parallel submits
 // may arrive out of order; do not prune txs within this window of the expected nonce.
@@ -163,4 +167,100 @@ func (bc *Blockchain) accountNoncesForMempool() map[string]uint64 {
 		out[addr] = q.Nonce
 	}
 	return out
+}
+
+func escrowAwaitingBlock(tx *Transaction) bool {
+	if tx == nil || tx.Hash == "" || tx.SigMain == "" {
+		return false
+	}
+	if tx.BlockNumber > 0 {
+		return false
+	}
+	switch tx.Type {
+	case "escrow_lock", "escrow_settle", "escrow_cancel", "escrow_refund":
+		return true
+	default:
+		return tx.Purpose == "deal"
+	}
+}
+
+// RequeueUnconfirmedEscrows puts indexed deal locks (and their settle/cancel)
+// back into the mempool when they never received a block number. A restart
+// keeps those rows in chain.json but drops the in-memory mempool, so the
+// lock would stay visible in the wallet without debiting the payer.
+func (bc *Blockchain) RequeueUnconfirmedEscrows() int {
+	bc.mu.RLock()
+	ledger := bc.ledger
+	inFlight := make(map[string]bool, len(bc.mempool)+len(bc.pendingBlock))
+	for _, tx := range bc.mempool {
+		if tx != nil && tx.Hash != "" {
+			inFlight[tx.Hash] = true
+		}
+	}
+	for _, tx := range bc.pendingBlock {
+		if tx != nil && tx.Hash != "" {
+			inFlight[tx.Hash] = true
+		}
+	}
+	cands := make([]*Transaction, 0)
+	senders := make(map[string]struct{})
+	for _, tx := range bc.transactions {
+		if !escrowAwaitingBlock(tx) || inFlight[tx.Hash] || bc.confirmedHashes[tx.Hash] {
+			continue
+		}
+		cands = append(cands, tx)
+		if tx.From != "" {
+			senders[tx.From] = struct{}{}
+		}
+	}
+	bc.mu.RUnlock()
+	if len(cands) == 0 {
+		return 0
+	}
+
+	accountNonce := map[string]uint64{}
+	if ledger != nil {
+		for addr := range senders {
+			q, err := ledger.Query(addr)
+			if err != nil {
+				continue
+			}
+			accountNonce[addr] = q.Nonce
+		}
+	}
+
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].From != cands[j].From {
+			return cands[i].From < cands[j].From
+		}
+		return cands[i].Nonce < cands[j].Nonce
+	})
+
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	for _, tx := range bc.mempool {
+		if tx != nil && tx.Hash != "" {
+			inFlight[tx.Hash] = true
+		}
+	}
+	for _, tx := range bc.pendingBlock {
+		if tx != nil && tx.Hash != "" {
+			inFlight[tx.Hash] = true
+		}
+	}
+	added := 0
+	for _, tx := range cands {
+		if tx == nil || inFlight[tx.Hash] || bc.confirmedHashes[tx.Hash] || tx.BlockNumber > 0 {
+			continue
+		}
+		if ledger != nil && tx.From != "" {
+			if want, ok := accountNonce[tx.From]; ok && uint64(tx.Nonce) < want {
+				continue
+			}
+		}
+		bc.mempool = append(bc.mempool, tx)
+		inFlight[tx.Hash] = true
+		added++
+	}
+	return added
 }
