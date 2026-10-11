@@ -7,6 +7,43 @@ import (
 	"platarium-gateway-go/internal/txpool"
 )
 
+func TestRestoreSkipsTxsOlderThanCanonicalHead(t *testing.T) {
+	dir := t.TempDir()
+	pool, err := txpool.Open(filepath.Join(dir, "txpool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc := NewBlockchain()
+	bc.SetTxPool(pool)
+	bc.SetRocksHeadProbe(func() (int64, bool) { return 19302, true })
+	bc.mu.Lock()
+	bc.blockHistory = []BlockRecord{{
+		BlockNumber: 19302,
+		Timestamp:   1787346877,
+		TxHashes:    []string{"old"},
+		TxCount:     1,
+	}}
+	bc.transactions["ancient"] = &Transaction{
+		Hash: "ancient", Type: "transfer", Timestamp: 1784584201, SigMain: "sig", From: "PxA",
+	}
+	bc.transactions["fresh"] = &Transaction{
+		Hash: "fresh", Type: "transfer", Timestamp: 1791679578, SigMain: "sig", From: "PxA",
+	}
+	bc.mu.Unlock()
+
+	n, err := bc.RestoreDurableTxs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("restored %d", n)
+	}
+	mem := bc.GetMempool()
+	if len(mem) != 1 || mem[0].Hash != "fresh" {
+		t.Fatalf("mempool %+v", mem)
+	}
+}
+
 func TestRestorePutsUncommittedTxBackInMempool(t *testing.T) {
 	dir := t.TempDir()
 	pool, err := txpool.Open(filepath.Join(dir, "txpool"))

@@ -99,6 +99,9 @@ func (h *Handler) initChainPersistence(stateFile string) {
 	} else if n > 0 {
 		logger.Info("Restored %d transaction(s) from the pool database into the mempool", n)
 	}
+	if removed := h.blockchain.PruneMempool(); removed > 0 {
+		logger.Info("Mempool pruned on startup: removed=%d remaining=%d", removed, len(h.blockchain.GetMempool()))
+	}
 	if h.blockchain.RocksEnabled() {
 		// Rebuild explorer tx/block index from Rocks after the pool is restored,
 		// so a cache tip ahead of Rocks is not written back over the pool.

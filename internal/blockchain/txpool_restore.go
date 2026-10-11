@@ -97,6 +97,12 @@ func (bc *Blockchain) RestoreDurableTxs() (int, error) {
 			}
 		}
 	}
+	headTs := int64(0)
+	for _, block := range kept {
+		if block.Timestamp > headTs {
+			headTs = block.Timestamp
+		}
+	}
 	if droppedLead {
 		bc.blockHistory = kept
 		head := historyHead(kept)
@@ -148,6 +154,16 @@ func (bc *Blockchain) RestoreDurableTxs() (int, error) {
 			continue
 		}
 		if tx.From == FaucetAddress || tx.Type == "faucet" || tx.SigMain == "" {
+			continue
+		}
+		// A transaction older than the last real block already missed that chain.
+		// Putting it back fills the mempool and stops the next block.
+		stamp := tx.Timestamp
+		if cur := bc.transactions[hash]; cur != nil && cur.Timestamp > stamp {
+			stamp = cur.Timestamp
+		}
+		if headTs > 0 && stamp > 0 && stamp <= headTs {
+			forget = append(forget, hash)
 			continue
 		}
 		current := bc.transactions[hash]

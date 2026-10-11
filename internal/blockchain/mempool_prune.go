@@ -2,6 +2,7 @@ package blockchain
 
 import (
 	"sort"
+	"time"
 
 	"platarium-gateway-go/internal/logger"
 )
@@ -9,6 +10,10 @@ import (
 // MempoolMaxNonceGap matches PlatariumCore MEMPOOL_MAX_NONCE_GAP — parallel submits
 // may arrive out of order; do not prune txs within this window of the expected nonce.
 const MempoolMaxNonceGap = 64
+
+// mempoolFutureMaxAgeSec keeps a fresh out-of-order nonce. Older futures are leftovers
+// from a previous run and must not sit in the pool forever ahead of the account nonce.
+const mempoolFutureMaxAgeSec = 6 * 3600
 
 // PruneMempool removes stale entries: txs already in chain (memory or RocksDB),
 // duplicate (from, nonce) pairs, and txs that can never be packed (nonce behind
@@ -33,6 +38,13 @@ func (bc *Blockchain) PruneMempool() int {
 
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
+
+	orig := make([]string, 0, len(bc.mempool))
+	for _, tx := range bc.mempool {
+		if tx != nil && tx.Hash != "" {
+			orig = append(orig, tx.Hash)
+		}
+	}
 
 	confirmed := make(map[string]bool)
 	for _, block := range bc.blockHistory {
@@ -114,12 +126,17 @@ func (bc *Blockchain) PruneMempool() int {
 					j--
 				}
 			}
+			now := time.Now().Unix()
 			for _, tx := range list {
 				if tx.Nonce < want {
 					dropHash[tx.Hash] = true
 					continue
 				}
 				if tx.Nonce > want+MempoolMaxNonceGap {
+					dropHash[tx.Hash] = true
+					continue
+				}
+				if tx.Nonce != want && tx.Timestamp > 0 && now-tx.Timestamp > mempoolFutureMaxAgeSec {
 					dropHash[tx.Hash] = true
 				}
 			}
@@ -140,6 +157,19 @@ func (bc *Blockchain) PruneMempool() int {
 
 	if removed > 0 {
 		bc.mempool = kept
+	}
+	if bc.txPool != nil && len(orig) > 0 {
+		keptSet := make(map[string]bool, len(kept))
+		for _, tx := range kept {
+			if tx != nil && tx.Hash != "" {
+				keptSet[tx.Hash] = true
+			}
+		}
+		for _, hash := range orig {
+			if !keptSet[hash] {
+				_ = bc.txPool.Delete(hash)
+			}
+		}
 	}
 	return removed
 }
@@ -206,6 +236,9 @@ func (bc *Blockchain) RequeueUnconfirmedEscrows() int {
 	senders := make(map[string]struct{})
 	for _, tx := range bc.transactions {
 		if !escrowAwaitingBlock(tx) || inFlight[tx.Hash] || bc.confirmedHashes[tx.Hash] {
+			continue
+		}
+		if tx.Timestamp > 0 && time.Now().Unix()-tx.Timestamp > mempoolFutureMaxAgeSec {
 			continue
 		}
 		cands = append(cands, tx)
