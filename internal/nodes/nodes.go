@@ -393,6 +393,48 @@ func NewTestNodesManager(peerIDs ...string) *NodesManager {
 	return nm
 }
 
+// peerLivePongWindow is how long a peer may go without a pong and still vote.
+// A socket that stays open but stops heartbeats must not block L1/L2.
+const peerLivePongWindow = 30 * time.Second
+
+func peerResponsive(lastPong time.Time, now time.Time) bool {
+	if lastPong.IsZero() {
+		return true
+	}
+	return now.Sub(lastPong) <= peerLivePongWindow
+}
+
+// GetResponsiveConnectedNodes returns peers that answered a heartbeat recently.
+// A zero LastPong means the peer has not been measured yet and still counts.
+func (nm *NodesManager) GetResponsiveConnectedNodes() []NodeInfo {
+	nm.mu.RLock()
+	defer nm.mu.RUnlock()
+	now := time.Now()
+	nodes := make([]NodeInfo, 0, len(nm.connectedNodes))
+	for _, peer := range nm.connectedNodes {
+		if !peerResponsive(peer.LastPong, now) {
+			continue
+		}
+		nodes = append(nodes, NodeInfo{
+			NodeID:  peer.NodeID,
+			Address: peer.Address,
+			Host:    peer.Host,
+			Port:    peer.Port,
+			RestURL: peer.RestURL,
+		})
+	}
+	return nodes
+}
+
+// SetPeerLastPongForTest sets heartbeat time for a connected test peer.
+func (nm *NodesManager) SetPeerLastPongForTest(nodeID string, at time.Time) {
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
+	if peer := nm.connectedNodes[nodeID]; peer != nil {
+		peer.LastPong = at
+	}
+}
+
 // GetConnectedNodes returns all connected peer nodes
 func (nm *NodesManager) GetConnectedNodes() []NodeInfo {
 	nm.mu.RLock()
@@ -689,11 +731,15 @@ func (nm *NodesManager) handlePeerConnection(conn *websocket.Conn, address strin
 						nm.mu.Lock()
 						for _, p := range nm.connectedNodes {
 							if p.Address == address {
-								if time.Since(p.LastPong) > 30*time.Second {
+								if time.Since(p.LastPong) > peerLivePongWindow {
 									p.PingFailures++
 									if p.PingFailures > 2 {
 										log.Printf("[NODE] Too many ping failures for %s, reconnecting...", address)
+										c := p.Conn
 										nm.mu.Unlock()
+										if c != nil {
+											_ = c.Close()
+										}
 										return
 									}
 								}

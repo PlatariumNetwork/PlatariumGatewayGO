@@ -13,6 +13,11 @@ git pull
 echo "== build =="
 go build -o platarium-gateway .
 
+echo "== stop gateways so the binary can be replaced =="
+pkill -f platarium-gateway || true
+pkill -f platarium-cli || true
+sleep 1
+
 echo "== deploy binary to node0 / node1 =="
 mkdir -p node0 node1
 cp -a platarium-gateway node0/platarium-gateway

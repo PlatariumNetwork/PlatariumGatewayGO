@@ -3,6 +3,7 @@ package handlers
 import (
 	"os"
 	"testing"
+	"time"
 
 	"platarium-gateway-go/internal/nodes"
 )
@@ -92,6 +93,12 @@ func TestAllowBlockCycleAutoConfirm(t *testing.T) {
 	h = &Handler{testnet: true, nodesManager: nodes.NewTestNodesManager("p1", "p2")}
 	if allowBlockCycleAutoConfirm(h) {
 		t.Fatal("default testnet + peers")
+	}
+	stale := nodes.NewTestNodesManager("stale")
+	stale.SetPeerLastPongForTest("stale", time.Now().Add(-2*time.Minute))
+	h = &Handler{testnet: true, nodesManager: stale}
+	if !allowBlockCycleAutoConfirm(h) {
+		t.Fatal("stale peer must not block testnet confirm")
 	}
 	h = &Handler{testnet: false, nodesManager: nodes.NewTestNodesManager()}
 	if allowBlockCycleAutoConfirm(h) {

@@ -9,6 +9,7 @@ import (
 
 	"platarium-gateway-go/internal/core"
 	"platarium-gateway-go/internal/logger"
+	"platarium-gateway-go/internal/nodes"
 )
 
 type autoBlockResponseWriter struct {
@@ -64,8 +65,17 @@ func coreBlockCycleEnabled(h *Handler) bool {
 		if h == nil || h.rustCore == nil || h.rustCore.Mode() != "rpc" {
 			return false
 		}
-		return len(h.nodesManager.GetConnectedNodes()) == 0
+		return len(h.consensusPeers()) == 0
 	}
+}
+
+// consensusPeers are connected peers that still answer heartbeats.
+// A stale socket must not sit in the L1/L2 committee and stall finality.
+func (h *Handler) consensusPeers() []nodes.NodeInfo {
+	if h == nil || h.nodesManager == nil {
+		return nil
+	}
+	return h.nodesManager.GetResponsiveConnectedNodes()
 }
 
 // allowBlockCycleAutoConfirm synthesizes Core L1/L2 votes only for explicit solo/testnet.
@@ -79,11 +89,12 @@ func allowBlockCycleAutoConfirm(h *Handler) bool {
 		case "0", "false", "no", "off":
 			return false
 		case "1", "true", "yes", "on":
-			return len(h.nodesManager.GetConnectedNodes()) == 0
+			return len(h.consensusPeers()) == 0
 		}
 	}
-	// Default: sole producer on testnet only.
-	return h.testnet && len(h.nodesManager.GetConnectedNodes()) == 0
+	// Default: sole producer on testnet only. A peer that stopped heartbeating
+	// does not count, otherwise its missing vote keeps every tx in the mempool.
+	return h.testnet && len(h.consensusPeers()) == 0
 }
 
 func (h *Handler) pruneMempoolBeforeL1() int {

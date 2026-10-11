@@ -2587,7 +2587,7 @@ func (h *Handler) L1CollectBlock(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	connected := h.nodesManager.GetConnectedNodes()
+	connected := h.consensusPeers()
 	candidates := make([]string, 0, 1+len(connected))
 	candidates = append(candidates, myId)
 	for _, n := range connected {
@@ -2626,7 +2626,7 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	collect := selected
 	txCount := len(collect)
 	myId := h.nodesManager.GetNodeID()
-	connected := h.nodesManager.GetConnectedNodes()
+	connected := h.consensusPeers()
 	candidates := make([]string, 0, 1+len(connected))
 	candidates = append(candidates, myId)
 	for _, n := range connected {
@@ -2965,7 +2965,7 @@ func (h *Handler) L2ConfirmBlock(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "no pending block (L1 collect first)"})
 		return
 	}
-	connected := h.nodesManager.GetConnectedNodes()
+	connected := h.consensusPeers()
 	candidates := make([]string, 0, 1+len(connected))
 	candidates = append(candidates, myId)
 	for _, n := range connected {
@@ -2998,7 +2998,7 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	myId := h.nodesManager.GetNodeID()
-	connected := h.nodesManager.GetConnectedNodes()
+	connected := h.consensusPeers()
 	candidates := make([]string, 0, 1+len(connected))
 	candidates = append(candidates, myId)
 	for _, n := range connected {
