@@ -98,6 +98,13 @@ func (h *Handler) DurableCommitAfterExplorer(
 	// Commit marker: Rocks head advanced (or Rocks disabled and explorer persisted with header).
 	// Only now is it safe to remove the Core state backup.
 	blockchain.DiscardStateBackup(stateBackup)
+	hashes := make([]string, 0, len(moved))
+	for _, tx := range moved {
+		if tx != nil && tx.Hash != "" {
+			hashes = append(hashes, tx.Hash)
+		}
+	}
+	h.blockchain.ForgetTxPool(hashes)
 	return out, nil
 }
 

@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"os"
+	"path/filepath"
 	"sort"
 
 	"platarium-gateway-go/internal/blockchain"
+	"platarium-gateway-go/internal/core"
 	"platarium-gateway-go/internal/logger"
+	"platarium-gateway-go/internal/txpool"
 )
 
 func (h *Handler) RegisterSyncCallbacks() {
@@ -90,6 +93,32 @@ func (h *Handler) initChainPersistence(stateFile string) {
 	if h.blockchain.RocksEnabled() {
 		h.initRocksFromChainFile(chainFile)
 	}
+	h.openTxPool(stateFile)
+	if n, err := h.blockchain.RestoreDurableTxs(); err != nil {
+		logger.Warn("Transaction pool restore failed: %v", err)
+	} else if n > 0 {
+		logger.Info("Restored %d transaction(s) from the pool database into the mempool", n)
+	}
+	if h.blockchain.RocksEnabled() {
+		// Rebuild explorer tx/block index from Rocks after the pool is restored,
+		// so a cache tip ahead of Rocks is not written back over the pool.
+		go h.hydrateExplorerIndexFromRocksIfNeeded()
+	}
+}
+
+func (h *Handler) openTxPool(stateFile string) {
+	dir := os.Getenv("PLATARIUM_TXPOOL_DIR")
+	if dir == "" {
+		rocksDir := core.ResolveRocksDBPath(stateFile)
+		dir = filepath.Join(filepath.Dir(rocksDir), "txpool")
+	}
+	pool, err := txpool.Open(dir)
+	if err != nil {
+		logger.Warn("Transaction pool database open failed (%s): %v", dir, err)
+		return
+	}
+	h.blockchain.SetTxPool(pool)
+	logger.Info("Transaction pool database: %s (separate from chain RocksDB, kept across restarts)", dir)
 }
 
 func (h *Handler) initRocksFromChainFile(chainFile string) {
@@ -116,11 +145,6 @@ func (h *Handler) initRocksFromChainFile(chainFile string) {
 	} else if head, err := rocks.RocksGetHead(); err == nil {
 		logger.Info("RocksDB canonical head=%d gatewayHead=%d", head, h.blockchain.HeadBlockNumber())
 	}
-
-	// Rebuild explorer tx/block index from Rocks (or refresh chain.json cache).
-	// Run async so Listen is not blocked on large histories, but always kick it
-	// when Rocks has a head OR the in-memory index lags blockHistory.
-	go h.hydrateExplorerIndexFromRocksIfNeeded()
 }
 
 func (h *Handler) hydrateExplorerIndexFromRocksIfNeeded() {

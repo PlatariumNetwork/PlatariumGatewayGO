@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"platarium-gateway-go/internal/core"
+	"platarium-gateway-go/internal/txpool"
 )
 
 // ErrL2ConfirmTOCTOU is returned when pending mutated after Core apply succeeded.
@@ -103,6 +104,7 @@ type Blockchain struct {
 	blockHistory       []BlockRecord
 	totalFeesCollected int64 // total fees from all confirmed TX
 	chainFile          string
+	txPool             *txpool.Store
 	// durableHead is the highest block number loaded or saved in chain.json.
 	// A restart must not persist a lower head over that snapshot.
 	durableHead      int64

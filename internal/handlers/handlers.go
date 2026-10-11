@@ -326,8 +326,7 @@ func (h *Handler) indexMempoolAdmission(tx *blockchain.Transaction) error {
 	if err := h.blockchain.AddTransaction(tx); err != nil {
 		log.Printf("[mempool] tx index warning for %s: %v", tx.Hash, err)
 	}
-	// Deal locks must survive a restart that drops the in-memory mempool.
-	// Ordinary transfers stay memory-only until the block confirm snapshot.
+	h.blockchain.SaveAdmittedTx(tx)
 	if tx.Type == "escrow_lock" || tx.Type == "escrow_settle" || tx.Type == "escrow_cancel" || tx.Type == "escrow_refund" || tx.Purpose == "deal" {
 		if err := h.blockchain.PersistChainSnapshot(); err != nil {
 			log.Printf("[mempool] escrow chain snapshot for %s: %v", tx.Hash, err)
