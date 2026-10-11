@@ -2872,6 +2872,10 @@ func (h *Handler) l1CollectBlockRun(w http.ResponseWriter, r *http.Request) {
 	accepted, toPenalize, coreRPCFailed := h.finalizeVoteRoundWithCore(round.votes, true, ok)
 	var degradedApplied bool
 	accepted, degradedApplied = maybeDegradedAccept(accepted, coreRPCFailed, totalExpected, round.votes, myId)
+	if !accepted && h.testnet && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
+		accepted = true
+		degradedApplied = true
+	}
 	if degradedApplied {
 		logger.Warn("L1 degraded: no peer votes (only proposer), accepting")
 		toPenalize = nil
@@ -3200,6 +3204,10 @@ func (h *Handler) l2ConfirmBlockRun(w http.ResponseWriter, r *http.Request) {
 	acceptedL2, toPenalizeL2, coreRPCFailedL2 := h.finalizeVoteRoundWithCore(round.votes, false, ok)
 	var degradedAppliedL2 bool
 	acceptedL2, degradedAppliedL2 = maybeDegradedAccept(acceptedL2, coreRPCFailedL2, totalExpected, round.votes, myId)
+	if !acceptedL2 && h.testnet && totalExpected > 1 && len(round.votes) == 1 && round.votes[myId] {
+		acceptedL2 = true
+		degradedAppliedL2 = true
+	}
 	if degradedAppliedL2 {
 		logger.Warn("L2 degraded: no peer votes (only confirmer), accepting")
 		toPenalizeL2 = nil

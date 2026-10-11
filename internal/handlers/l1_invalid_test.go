@@ -15,6 +15,7 @@ func TestIsPermanentMempoolInvalid(t *testing.T) {
 		{"insufficient PLP balance: need 10, available 0", true},
 		{"signature verification failed", true},
 		{"", true},
+		{"L1 verification failed for tx c5aad07b99f189cb33f0e1b1ef1b4854c0aa15aeeb99bde0a6e30112254f85ca", false},
 	}
 	for _, tc := range cases {
 		got := isPermanentMempoolInvalid(tc.msg)

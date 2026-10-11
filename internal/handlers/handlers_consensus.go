@@ -63,10 +63,10 @@ func txsToCoreJSONArray(txs []*blockchain.Transaction) (string, bool) {
 
 // l1ValidateOutcome is the result of Core L1 tx checks (may include invalid hashes to drop).
 type l1ValidateOutcome struct {
-	OK             bool
-	Err            error
-	InvalidHashes  []string
-	ValidTxs       []*blockchain.Transaction
+	OK            bool
+	Err           error
+	InvalidHashes []string
+	ValidTxs      []*blockchain.Transaction
 }
 
 // validateTxsForL1 verifies transactions against Core state (L1 confirmation layer).
@@ -221,6 +221,14 @@ func isPermanentMempoolInvalid(errMsg string) bool {
 	if msg == "" {
 		// Unknown failure from Core without detail — treat as permanent to avoid stalls.
 		return true
+	}
+	// Core turns both a bad signature and a nonce mismatch into this one line.
+	// Deleting the tx here makes a live transfer vanish and reappear.
+	if strings.HasPrefix(msg, "l1 verification failed for tx ") &&
+		!strings.Contains(msg, "signature") &&
+		!strings.Contains(msg, "nonce") &&
+		!strings.Contains(msg, "balance") {
+		return false
 	}
 	// "invalid nonce: expected N, got M"
 	if strings.Contains(msg, "nonce") {

@@ -200,15 +200,16 @@ func (h *Handler) autoBlockCollectViaCycle() bool {
 		return h.autoBlockCollectL1()
 	}
 	if !res.OK || len(res.ValidHashes) == 0 {
-		// Poison / permanently-invalid txs must leave the mempool, otherwise the
-		// 500ms auto-block worker re-verifies them forever (100% CPU).
-		if hash := extractFailedTxHash(res.Error); hash != "" {
+		// A generic L1 line is not proof the transfer is bad. Dropping it makes the
+		// explorer row vanish until the wallet submits the same hash again.
+		detail := strings.TrimSpace(res.Error + " " + string(res.L1))
+		if hash := extractFailedTxHash(res.Error); hash != "" && isPermanentMempoolInvalid(detail) {
 			h.blockchain.RemoveFromMempool([]string{hash})
-			logger.Warn("block_cycle no valid txs: dropped poison tx %s (%s)", hash, res.Error)
-		} else {
-			logger.Warn("block_cycle no valid txs: %s", res.Error)
+			logger.Warn("block_cycle no valid txs: dropped poison tx %s (%s)", hash, detail)
+			return false
 		}
-		return false
+		logger.Warn("block_cycle no valid txs: %s", detail)
+		return h.autoBlockCollectL1()
 	}
 	txs := h.blockchain.SelectTxsByHashes(res.ValidHashes)
 	if len(txs) == 0 {
