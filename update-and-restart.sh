@@ -8,20 +8,36 @@ echo "== nginx (Hestia proxy for RPC domain) =="
 bash scripts/ensure-nginx.sh || true
 
 echo "== git pull =="
-git pull
+git fetch origin main
+git pull origin main
 
 echo "== build =="
 go build -o platarium-gateway .
 
 echo "== stop gateways so the binary can be replaced =="
-pkill -f platarium-gateway || true
-pkill -f platarium-cli || true
-sleep 1
+# SIGTERM often outlives the old 1s pause, and cp then hits ETXTBSY.
+pkill -9 -f 'platarium-gateway -testnet' 2>/dev/null || true
+pkill -9 -f platarium-cli 2>/dev/null || true
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if ! fuser node0/platarium-gateway node1/platarium-gateway >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+install_gateway_bin() {
+  local dest="$1"
+  cp -a platarium-gateway "${dest}.new"
+  # Unlink the running inode first. Overwriting it in place returns "Text file busy".
+  rm -f "$dest"
+  mv "${dest}.new" "$dest"
+  chmod +x "$dest"
+}
 
 echo "== deploy binary to node0 / node1 =="
 mkdir -p node0 node1
-cp -a platarium-gateway node0/platarium-gateway
-cp -a platarium-gateway node1/platarium-gateway
+install_gateway_bin node0/platarium-gateway
+install_gateway_bin node1/platarium-gateway
 
 # Optional: share root .env into node folders if they have none yet
 if [[ -f .env ]]; then
