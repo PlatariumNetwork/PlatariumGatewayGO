@@ -110,6 +110,29 @@ func (c *RPCClient) Handshake() error {
 	return nil
 }
 
+func isRocksAdminMethod(method string) bool {
+	switch method {
+	case "rocks_commit_block", "rocks_bootstrap_snapshot", "migrate_json_to_rocks":
+		return true
+	default:
+		return false
+	}
+}
+
+// applyRPCAuth attaches the mutate token and, for Rocks admin methods, the
+// separate storage-admin token Core requires on rocks_commit_block.
+func applyRPCAuth(req map[string]interface{}, method, authToken string) {
+	if tok := strings.TrimSpace(authToken); tok != "" {
+		req["auth_token"] = tok
+	}
+	if !isRocksAdminMethod(method) {
+		return
+	}
+	if admin := strings.TrimSpace(os.Getenv("PLATARIUM_CORE_ADMIN_TOKEN")); admin != "" {
+		req["admin_token"] = admin
+	}
+}
+
 func isMutatingRPCMethod(method string) bool {
 	switch method {
 	case "state_apply_tx", "state_credit", "state_credit_token", "kernel_apply_batch", "kernel_commit_diff",
@@ -171,9 +194,7 @@ func (c *RPCClient) Call(method string, params map[string]interface{}) (string, 
 		"method":  method,
 		"params":  params,
 	}
-	if c.authToken != "" {
-		req["auth_token"] = c.authToken
-	}
+	applyRPCAuth(req, method, c.authToken)
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
 		metrics.Global.IncCoreRPCErrors()

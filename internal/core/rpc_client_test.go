@@ -62,6 +62,23 @@ func TestNormalizeRPCOutputVerify(t *testing.T) {
 	}
 }
 
+func TestApplyRPCAuthSendsAdminTokenOnlyForRocksAdmin(t *testing.T) {
+	t.Setenv("PLATARIUM_CORE_ADMIN_TOKEN", "admin-secret")
+	commit := map[string]interface{}{}
+	applyRPCAuth(commit, "rocks_commit_block", "rpc-tok")
+	if commit["auth_token"] != "rpc-tok" || commit["admin_token"] != "admin-secret" {
+		t.Fatalf("rocks commit auth = %#v", commit)
+	}
+	apply := map[string]interface{}{}
+	applyRPCAuth(apply, "state_apply_tx", "rpc-tok")
+	if _, ok := apply["admin_token"]; ok {
+		t.Fatal("admin token must not be attached to a mutate call")
+	}
+	if apply["auth_token"] != "rpc-tok" {
+		t.Fatalf("mutate auth = %#v", apply)
+	}
+}
+
 func TestIsMutatingRPCMethod(t *testing.T) {
 	if !isMutatingRPCMethod("state_apply_tx") {
 		t.Fatal("state_apply_tx should be mutating")
