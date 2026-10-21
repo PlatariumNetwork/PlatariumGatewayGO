@@ -38,7 +38,11 @@ var signedDealAdmit = func(h *Handler, tx *blockchain.Transaction) error {
 
 func (h *Handler) deals() *deals.Book {
 	if h.dealBook == nil {
-		h.dealBook = deals.NewBook()
+		path := ""
+		if h.dealStateFile != "" {
+			path = h.dealStateFile + ".volunteers.json"
+		}
+		h.dealBook = deals.OpenBook(path)
 	}
 	return h.dealBook
 }
@@ -141,12 +145,24 @@ func (h *Handler) admitDealSettle(w http.ResponseWriter, r *http.Request, disput
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "signed settle must use purpose deal"})
 		return
 	}
+	if tx.SettleOutcomeKey == "timeout" {
+		if err := h.deals().TimeoutAllowed(body.CaseID); err != nil {
+			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
 	if dispute {
-		outcome, ok := h.deals().Quorum(body.CaseID)
-		if !ok || outcome != tx.SettleOutcomeKey {
+		panel, ok := h.deals().Panel(body.CaseID)
+		if !ok {
+			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "recorded panel is required"})
+			return
+		}
+		outcome, qok := h.deals().Quorum(body.CaseID)
+		if !qok || outcome != tx.SettleOutcomeKey {
 			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "dispute quorum does not match this settle"})
 			return
 		}
+		_ = panel
 	}
 	if err := signedDealAdmit(h, tx); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -195,6 +211,27 @@ func (h *Handler) GetDeal(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, row)
 }
 
+func (h *Handler) PutVolunteerRoster(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Bonded []string `json:"bonded"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	h.deals().SetRoster(body.Bonded)
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"ok": true, "count": len(h.deals().Roster())})
+}
+
+func (h *Handler) ListVolunteerBriefs(w http.ResponseWriter, r *http.Request) {
+	addr := r.URL.Query().Get("address")
+	if addr == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "address required"})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"briefs": h.deals().BriefsFor(addr)})
+}
+
 func (h *Handler) OpenDealDispute(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Terms       string   `json:"terms"`
@@ -204,12 +241,22 @@ func (h *Handler) OpenDealDispute(w http.ResponseWriter, r *http.Request) {
 		Creator     string   `json:"creator"`
 		Beneficiary string   `json:"beneficiary"`
 		Node        string   `json:"node"`
+		PriorResult string   `json:"priorResult"`
+		Party       string   `json:"party"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	brief, err := h.deals().Open(body.Terms, body.OpenBlock, body.EscrowID, body.Bonded, []string{body.Creator, body.Beneficiary, body.Node})
+	if body.Party != "" && body.Party != body.Creator && body.Party != body.Beneficiary {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "only a party may open a complaint"})
+		return
+	}
+	book := h.deals()
+	if len(book.Roster()) == 0 && len(body.Bonded) > 0 {
+		book.SetRoster(body.Bonded)
+	}
+	brief, err := book.OpenAppeal(body.Terms, body.OpenBlock, body.EscrowID, body.Bonded, []string{body.Creator, body.Beneficiary, body.Node}, body.PriorResult)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -246,14 +293,27 @@ func (h *Handler) RevealVolunteer(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Key     string `json:"key"`
 		Verdict string `json:"verdict"`
+		Nonce   string `json:"nonce"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	if err := h.deals().Reveal(mux.Vars(r)["caseId"], body.Key, body.Verdict); err != nil {
+	if err := h.deals().RevealNonce(mux.Vars(r)["caseId"], body.Key, body.Verdict, body.Nonce); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Handler) FreezeVolunteerHeight(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Height uint64 `json:"height"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	h.deals().SetHeight(body.Height)
+	jsonResponse(w, http.StatusOK, map[string]uint64{"height": h.deals().Height()})
 }

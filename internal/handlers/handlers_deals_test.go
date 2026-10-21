@@ -205,9 +205,9 @@ func TestDisputeSettleNeedsThree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	five, err := deals.PickFive("1||escrow-1", bonded, []string{"c", "b", "n"})
-	if err != nil {
-		t.Fatal(err)
+	five, ok := h.deals().Panel(brief.CaseID)
+	if !ok {
+		t.Fatal("panel")
 	}
 	prev := signedDealAdmit
 	admits := 0
@@ -224,7 +224,7 @@ func TestDisputeSettleNeedsThree(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	raw := dealTxJSON(escrow.TxKindSettle, escrow.PurposeDeal, "PLP", "n", deals.VerdictFulfilled)
+	raw := dealTxJSON(escrow.TxKindSettle, escrow.PurposeDeal, "PLP", "n", deals.OutcomeFulfilled)
 	body := `{"caseId":"` + brief.CaseID + `","transaction":` + raw + `}`
 	req := httptest.NewRequest(http.MethodPost, "/api/deals/dispute-settle", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
@@ -238,6 +238,7 @@ func TestDisputeSettleNeedsThree(t *testing.T) {
 	if err := h.deals().Reveal(brief.CaseID, five[2], deals.VerdictFulfilled); err != nil {
 		t.Fatal(err)
 	}
+	h.deals().SetHeight(2)
 	req = httptest.NewRequest(http.MethodPost, "/api/deals/dispute-settle", bytes.NewBufferString(body))
 	w = httptest.NewRecorder()
 	h.SubmitDealDisputeSettle(w, req)
